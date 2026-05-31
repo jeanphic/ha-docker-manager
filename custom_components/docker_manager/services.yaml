@@ -1,0 +1,11 @@
+prune_images:
+  name: Prune Docker Images
+  description: Remove all unused Docker images to free up disk space.
+  fields:
+    entry_id:
+      name: Instance
+      description: Config entry ID (optional, uses default if omitted).
+      required: false
+      example: "abc123def456"
+      selector:
+        text:

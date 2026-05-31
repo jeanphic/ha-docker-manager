@@ -1,0 +1,61 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Docker Manager",
+        "description": "Choisissez le type de connexion à votre démon Docker.",
+        "data": {
+          "connection_type": "Type de connexion"
+        }
+      },
+      "local": {
+        "title": "Connexion locale",
+        "description": "Connexion via socket Unix (ex: {example}). Assurez-vous que le socket est monté dans le conteneur Home Assistant.",
+        "data": {
+          "url": "URL du socket",
+          "scan_interval": "Intervalle de mise à jour (secondes)"
+        }
+      },
+      "remote": {
+        "title": "Connexion distante",
+        "description": "Connexion via TCP (ex: {example}). Activez d'abord l'accès distant sur votre démon Docker.",
+        "data": {
+          "url": "URL TCP",
+          "scan_interval": "Intervalle de mise à jour (secondes)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter au démon Docker. Vérifiez l'URL et les droits d'accès."
+    },
+    "abort": {
+      "already_configured": "Docker Manager est déjà configuré pour cette instance."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options Docker Manager",
+        "data": {
+          "scan_interval": "Intervalle de mise à jour (secondes)",
+          "containers_exclude": "Conteneurs à exclure (séparés par des virgules)"
+        },
+        "description_placeholders": {
+          "example_exclude": "portainer, traefik, watchtower"
+        }
+      }
+    }
+  },
+  "services": {
+    "prune_images": {
+      "name": "Nettoyer les images Docker",
+      "description": "Supprime toutes les images Docker inutilisées pour libérer de l'espace disque.",
+      "fields": {
+        "entry_id": {
+          "name": "Instance",
+          "description": "ID de l'entrée de configuration (optionnel)."
+        }
+      }
+    }
+  }
+}

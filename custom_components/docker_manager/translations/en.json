@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Docker Manager",
+        "description": "Choose the connection type to your Docker daemon.",
+        "data": {
+          "connection_type": "Connection type"
+        }
+      },
+      "local": {
+        "title": "Local connection",
+        "description": "Connect via Unix socket (e.g. {example}). Make sure the socket is mounted in the Home Assistant container.",
+        "data": {
+          "url": "Socket URL",
+          "scan_interval": "Update interval (seconds)"
+        }
+      },
+      "remote": {
+        "title": "Remote connection",
+        "description": "Connect via TCP (e.g. {example}). Enable remote access on your Docker daemon first.",
+        "data": {
+          "url": "TCP URL",
+          "scan_interval": "Update interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Docker daemon. Check the URL and access rights."
+    },
+    "abort": {
+      "already_configured": "Docker Manager is already configured for this instance."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Docker Manager Options",
+        "data": {
+          "scan_interval": "Update interval (seconds)",
+          "containers_exclude": "Containers to exclude (comma-separated)"
+        }
+      }
+    }
+  },
+  "services": {
+    "prune_images": {
+      "name": "Prune Docker Images",
+      "description": "Remove all unused Docker images to free up disk space.",
+      "fields": {
+        "entry_id": {
+          "name": "Instance",
+          "description": "Config entry ID (optional)."
+        }
+      }
+    }
+  }
+}
