@@ -243,7 +243,11 @@ class DockerManagerOptionsFlow(config_entries.OptionsFlow):
             )
 
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # Persist scan_interval in entry data as well so coordinator picks it up
+            return self.async_create_entry(title="", data={
+                CONF_CONTAINERS_INCLUDE: user_input.get(CONF_CONTAINERS_INCLUDE, []),
+                CONF_SCAN_INTERVAL: user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            })
 
         current_include: list[str] = list(
             self.config_entry.options.get(

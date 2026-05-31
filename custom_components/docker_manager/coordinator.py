@@ -114,12 +114,12 @@ class ContainerData:
 class DockerCoordinator(DataUpdateCoordinator):
     """Manages polling of Docker daemon and update checks."""
 
-    def __init__(self, hass: HomeAssistant, url: str, entry_id: str, included_containers: list[str] | None = None) -> None:
+    def __init__(self, hass: HomeAssistant, url: str, entry_id: str, included_containers: list[str] | None = None, scan_interval: int = DEFAULT_SCAN_INTERVAL) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+            update_interval=timedelta(seconds=scan_interval),
         )
         self.url = url
         self.entry_id = entry_id

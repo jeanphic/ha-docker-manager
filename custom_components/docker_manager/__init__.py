@@ -8,7 +8,15 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 import voluptuous as vol
 
-from .const import DOMAIN, PLATFORMS, CONF_URL, CONF_CONTAINERS_INCLUDE, DEFAULT_URL
+from .const import (
+    DOMAIN,
+    PLATFORMS,
+    CONF_URL,
+    CONF_CONTAINERS_INCLUDE,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_URL,
+    DEFAULT_SCAN_INTERVAL,
+)
 from .coordinator import DockerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -18,17 +26,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Docker Manager from a config entry."""
     url = entry.data.get(CONF_URL, DEFAULT_URL)
 
-    # included_containers: from options (if changed after setup) or initial data
-    # Empty list = monitor all containers
+    # Options always take priority over initial data (set after first setup)
     included_containers: list[str] = list(
         entry.options.get(
             CONF_CONTAINERS_INCLUDE,
             entry.data.get(CONF_CONTAINERS_INCLUDE, []),
         )
     )
+    scan_interval: int = int(
+        entry.options.get(
+            CONF_SCAN_INTERVAL,
+            entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        )
+    )
 
     coordinator = DockerCoordinator(
-        hass, url, entry.entry_id, included_containers=included_containers
+        hass,
+        url,
+        entry.entry_id,
+        included_containers=included_containers,
+        scan_interval=scan_interval,
     )
 
     try:
@@ -42,7 +59,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Reload integration when options change (container selection updated)
+    # Reload the full integration whenever options are saved
+    # This ensures new container selections and scan intervals are applied
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     # --- Service: prune unused images ---
