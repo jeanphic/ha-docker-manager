@@ -102,7 +102,7 @@ class ContainerData:
                 self.memory_percent = round((real_usage / limit) * 100.0, 2)
 
             # Network
-            networks = stats.get("networks", {})
+            networks = stats.get("networks") or {}
             total_rx = sum(n.get("rx_bytes", 0) for n in networks.values())
             total_tx = sum(n.get("tx_bytes", 0) for n in networks.values())
             self.net_total_up = round(total_tx / (1024 * 1024), 4)
@@ -180,7 +180,12 @@ class DockerCoordinator(DataUpdateCoordinator):
                     info = await c.show()
                     stats = None
                     if info.get("State", {}).get("Status") == "running":
-                        stats = await c.stats(stream=False)
+                        raw = await c.stats(stream=False)
+                        # aiodocker returns a list of snapshots; take the first
+                        if isinstance(raw, list):
+                            stats = raw[0] if raw else None
+                        elif isinstance(raw, dict):
+                            stats = raw
 
                     cdata = ContainerData(info, stats)
 
@@ -198,7 +203,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
                     # Save raw net totals for next delta
                     if stats:
-                        networks = stats.get("networks", {})
+                        networks = stats.get("networks") or {}
                         self._prev_net[cdata.name] = {
                             "rx": sum(n.get("rx_bytes", 0) for n in networks.values()),
                             "tx": sum(n.get("tx_bytes", 0) for n in networks.values()),
@@ -218,7 +223,7 @@ class DockerCoordinator(DataUpdateCoordinator):
     def _compute_net_speed(self, cdata: ContainerData, stats: dict) -> None:
         """Compute network speed in kB/s using delta from last poll."""
         try:
-            networks = stats.get("networks", {})
+            networks = stats.get("networks") or {}
             now = datetime.now(timezone.utc)
             prev = self._prev_net.get(cdata.name, {})
             prev_time = self._prev_net_time.get(cdata.name)
