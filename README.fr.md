@@ -2,7 +2,7 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/release/jeanphic/ha-docker-manager.svg)](https://github.com/jeanphic/ha-docker-manager/releases)
-[![License](https://img.shields.io/github/license/votre-github/ha-docker-manager.svg)](LICENSE)
+[![License](https://img.shields.io/github/license/jeanphic/ha-docker-manager.svg)](LICENSE)
 
 Supervise, contrôle et mettez à jour vos conteneurs Docker directement depuis Home Assistant.
 

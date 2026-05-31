@@ -10,7 +10,7 @@
       },
       "local": {
         "title": "Connexion locale",
-        "description": "Connexion via socket Unix (ex: {example}). Assurez-vous que le socket est monté dans le conteneur Home Assistant.",
+        "description": "Connexion via socket Unix (ex: {example}).",
         "data": {
           "url": "URL du socket",
           "scan_interval": "Intervalle de mise à jour (secondes)"
@@ -18,10 +18,17 @@
       },
       "remote": {
         "title": "Connexion distante",
-        "description": "Connexion via TCP (ex: {example}). Activez d'abord l'accès distant sur votre démon Docker.",
+        "description": "Connexion via TCP (ex: {example}).",
         "data": {
           "url": "URL TCP",
           "scan_interval": "Intervalle de mise à jour (secondes)"
+        }
+      },
+      "containers": {
+        "title": "Sélection des conteneurs",
+        "description": "{count} conteneur(s) détecté(s). Sélectionnez ceux que vous souhaitez superviser. Tout décocher revient à tout superviser.",
+        "data": {
+          "containers_include": "Conteneurs à superviser"
         }
       }
     },
@@ -36,12 +43,10 @@
     "step": {
       "init": {
         "title": "Options Docker Manager",
+        "description": "{count} conteneur(s) disponible(s).",
         "data": {
-          "scan_interval": "Intervalle de mise à jour (secondes)",
-          "containers_exclude": "Conteneurs à exclure (séparés par des virgules)"
-        },
-        "description_placeholders": {
-          "example_exclude": "portainer, traefik, watchtower"
+          "containers_include": "Conteneurs à superviser",
+          "scan_interval": "Intervalle de mise à jour (secondes)"
         }
       }
     }

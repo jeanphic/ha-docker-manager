@@ -134,7 +134,4 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
 
     async def async_check_for_update(self) -> None:
         """Manually trigger an update check for this container."""
-        data = self.container_data
-        if data:
-            await self.coordinator._check_container_update(data)
-            self.async_write_ha_state()
+        await self.coordinator.async_check_update(self._container_name)

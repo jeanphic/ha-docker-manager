@@ -10,7 +10,7 @@
       },
       "local": {
         "title": "Local connection",
-        "description": "Connect via Unix socket (e.g. {example}). Make sure the socket is mounted in the Home Assistant container.",
+        "description": "Connect via Unix socket (e.g. {example}).",
         "data": {
           "url": "Socket URL",
           "scan_interval": "Update interval (seconds)"
@@ -18,10 +18,17 @@
       },
       "remote": {
         "title": "Remote connection",
-        "description": "Connect via TCP (e.g. {example}). Enable remote access on your Docker daemon first.",
+        "description": "Connect via TCP (e.g. {example}).",
         "data": {
           "url": "TCP URL",
           "scan_interval": "Update interval (seconds)"
+        }
+      },
+      "containers": {
+        "title": "Container selection",
+        "description": "{count} container(s) detected. Select the ones you want to monitor. Leaving all unchecked monitors everything.",
+        "data": {
+          "containers_include": "Containers to monitor"
         }
       }
     },
@@ -36,9 +43,10 @@
     "step": {
       "init": {
         "title": "Docker Manager Options",
+        "description": "{count} container(s) available.",
         "data": {
-          "scan_interval": "Update interval (seconds)",
-          "containers_exclude": "Containers to exclude (comma-separated)"
+          "containers_include": "Containers to monitor",
+          "scan_interval": "Update interval (seconds)"
         }
       }
     }

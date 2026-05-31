@@ -7,6 +7,7 @@ PLATFORMS = ["sensor", "switch", "button", "update"]
 # Config
 CONF_URL = "url"
 CONF_CONTAINERS_EXCLUDE = "containers_exclude"
+CONF_CONTAINERS_INCLUDE = "containers_include"
 CONF_SCAN_INTERVAL = "scan_interval"
 
 DEFAULT_URL = "unix:///var/run/docker.sock"

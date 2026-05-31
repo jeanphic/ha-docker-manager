@@ -1,7 +1,6 @@
 """DataUpdateCoordinator for Docker Manager."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import timedelta, datetime, timezone
 from typing import Any
@@ -15,7 +14,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import (
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
-    DEFAULT_UPDATE_CHECK_INTERVAL,
+    CONF_CONTAINERS_INCLUDE,
     HA_CONTAINER_NAMES,
 )
 
@@ -115,7 +114,7 @@ class ContainerData:
 class DockerCoordinator(DataUpdateCoordinator):
     """Manages polling of Docker daemon and update checks."""
 
-    def __init__(self, hass: HomeAssistant, url: str, entry_id: str) -> None:
+    def __init__(self, hass: HomeAssistant, url: str, entry_id: str, included_containers: list[str] | None = None) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -124,11 +123,11 @@ class DockerCoordinator(DataUpdateCoordinator):
         )
         self.url = url
         self.entry_id = entry_id
+        # Empty list = monitor all containers
+        self.included_containers: list[str] = included_containers or []
         self._client: aiodocker.Docker | None = None
         self._prev_net: dict[str, dict] = {}
         self._prev_net_time: dict[str, datetime] = {}
-        self._update_check_task: asyncio.Task | None = None
-
         # Global Docker info
         self.docker_version: str = ""
         self.images_total: int = 0
@@ -145,16 +144,8 @@ class DockerCoordinator(DataUpdateCoordinator):
         self.docker_version = info.get("ServerVersion", "unknown")
         _LOGGER.info("Connected to Docker %s at %s", self.docker_version, self.url)
 
-        # Start periodic update-check task
-        self._update_check_task = self.hass.async_create_background_task(
-            self._periodic_update_check(),
-            "docker_manager_update_check",
-        )
-
     async def async_disconnect(self) -> None:
         """Disconnect and clean up."""
-        if self._update_check_task:
-            self._update_check_task.cancel()
         if self._client:
             await self._client.close()
             self._client = None
@@ -210,6 +201,10 @@ class DockerCoordinator(DataUpdateCoordinator):
                         }
                         self._prev_net_time[cdata.name] = datetime.now(timezone.utc)
 
+                    # Filter: skip containers not in include list (empty = all)
+                    if self.included_containers and cdata.name not in self.included_containers:
+                        continue
+
                     result[cdata.name] = cdata
 
                 except DockerError as err:
@@ -251,65 +246,57 @@ class DockerCoordinator(DataUpdateCoordinator):
     # Update check (digest comparison)
     # ------------------------------------------------------------------ #
 
-    async def _periodic_update_check(self) -> None:
-        """Run update checks every DEFAULT_UPDATE_CHECK_INTERVAL seconds."""
-        while True:
-            await asyncio.sleep(DEFAULT_UPDATE_CHECK_INTERVAL)
-            await self.async_check_all_updates()
-
-    async def async_check_all_updates(self) -> None:
-        """Check all running containers for available updates."""
-        if not self.data:
-            return
-        for name, cdata in self.data.items():
-            if cdata.state == "running":
-                await self._check_container_update(cdata)
-        self.async_set_updated_data(self.data)
-
-    async def _check_container_update(self, cdata: ContainerData) -> None:
-        """Compare local image digest vs remote registry."""
+    async def async_check_update(self, container_name: str) -> None:
+        """Pull image and compare ID before/after to detect an update.
+        This is the most reliable method: works with :latest and pinned tags,
+        all registries, no auth issues. Docker only downloads new layers if needed.
+        """
         if not self._client:
             return
+
+        cdata = self.get_container_data(container_name)
+        if not cdata:
+            _LOGGER.warning("async_check_update: container %s not found", container_name)
+            return
+
+        image_name = cdata.image
+        if not image_name:
+            return
+        if ":" not in image_name:
+            image_name += ":latest"
+
+        _LOGGER.info("Checking update for %s (image: %s)", container_name, image_name)
+
         try:
-            image_name = cdata.image
-            if not image_name:
-                return
-            if ":" not in image_name:
-                image_name += ":latest"
-
-            # Get local image digest
+            # 1. Get current local image ID
             local_image = await self._client.images.inspect(image_name)
-            local_digest = ""
-            repo_digests = local_image.get("RepoDigests", [])
-            if repo_digests:
-                local_digest = repo_digests[0].split("@")[-1]
+            local_id = local_image.get("Id", "")
 
-            # Pull manifest to get remote digest (no download)
-            distribution = await self._client.distributions.inspect(image_name)
-            remote_digest = (
-                distribution.get("Descriptor", {}).get("digest", "") or ""
-            )
+            # 2. Pull from registry (downloads only new layers if any)
+            await self._client.images.pull(image_name)
 
-            cdata.local_digest = local_digest
-            cdata.latest_digest = remote_digest
-            cdata.update_available = bool(
-                remote_digest
-                and local_digest
-                and remote_digest != local_digest
-            )
+            # 3. Get image ID after pull
+            new_image = await self._client.images.inspect(image_name)
+            new_id = new_image.get("Id", "")
+
+            cdata.update_available = bool(local_id and new_id and local_id != new_id)
+            cdata.local_digest = local_id[:19] if local_id else ""
+            cdata.latest_digest = new_id[:19] if new_id else ""
             cdata.last_update_check = datetime.now(timezone.utc)
 
-            _LOGGER.debug(
-                "Update check %s: local=%s remote=%s available=%s",
-                cdata.name,
-                local_digest[:16],
-                remote_digest[:16],
+            _LOGGER.info(
+                "Update check %s: local=%s pulled=%s update_available=%s",
+                container_name,
+                local_id[:19],
+                new_id[:19],
                 cdata.update_available,
             )
 
         except Exception as err:
-            _LOGGER.debug("Could not check update for %s: %s", cdata.name, err)
+            _LOGGER.warning("Update check failed for %s: %s", container_name, err)
             cdata.last_update_check = datetime.now(timezone.utc)
+
+        self.async_set_updated_data(self.data)
 
     # ------------------------------------------------------------------ #
     # Container actions

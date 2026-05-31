@@ -1,4 +1,4 @@
-"""Button platform for Docker Manager - restart containers."""
+"""Button platform for Docker Manager - restart and check-update per container."""
 from __future__ import annotations
 
 import logging
@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, ICON_RESTART, HA_CONTAINER_NAMES
+from .const import DOMAIN, ICON_RESTART, ICON_UPDATE, HA_CONTAINER_NAMES
 from .coordinator import DockerCoordinator
 from .entity import DockerContainerEntity
 
@@ -22,19 +22,24 @@ async def async_setup_entry(
 ) -> None:
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = [
-        DockerRestartButton(coordinator, name)
-        for name in coordinator.data or {}
-    ]
+    entities: list[ButtonEntity] = []
+    for name in coordinator.data or {}:
+        entities.append(DockerRestartButton(coordinator, name))
+        entities.append(DockerCheckUpdateButton(coordinator, name))
+
     async_add_entities(entities)
 
     def _handle_update() -> None:
         new = []
         existing_ids = {e.unique_id for e in entities}
         for name in coordinator.data or {}:
-            uid = f"{coordinator.entry_id}_{name}_restart"
-            if uid not in existing_ids:
-                new.append(DockerRestartButton(coordinator, name))
+            for cls, suffix in [
+                (DockerRestartButton, "restart"),
+                (DockerCheckUpdateButton, "check_update"),
+            ]:
+                uid = f"{coordinator.entry_id}_{name}_{suffix}"
+                if uid not in existing_ids:
+                    new.append(cls(coordinator, name))
         if new:
             async_add_entities(new)
 
@@ -52,7 +57,6 @@ class DockerRestartButton(DockerContainerEntity, ButtonEntity):
         self._attr_name = "Restart"
 
     async def async_press(self) -> None:
-        """Restart the container."""
         if self._container_name.lower() in HA_CONTAINER_NAMES:
             _LOGGER.warning(
                 "Refusing to restart Home Assistant container '%s'",
@@ -61,3 +65,22 @@ class DockerRestartButton(DockerContainerEntity, ButtonEntity):
             return
         await self.coordinator.async_restart_container(self._container_name)
         await self.coordinator.async_request_refresh()
+
+
+class DockerCheckUpdateButton(DockerContainerEntity, ButtonEntity):
+    """Button to manually check if a newer image is available for a container.
+
+    Performs a docker pull (downloads only new layers if any) then compares
+    the image ID before and after. Works reliably with :latest and pinned tags.
+    """
+
+    _attr_icon = ICON_UPDATE
+
+    def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
+        super().__init__(coordinator, container_name)
+        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_check_update"
+        self._attr_name = "Check for Update"
+
+    async def async_press(self) -> None:
+        """Trigger an update check for this container."""
+        await self.coordinator.async_check_update(self._container_name)
