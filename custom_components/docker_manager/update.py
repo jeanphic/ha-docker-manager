@@ -59,7 +59,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
         super().__init__(coordinator, container_name)
         self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_update"
         self._attr_name = "Update"
-        self._in_progress: bool = False
+        self._in_progress: bool | int = False
 
     @property
     def title(self) -> str:
@@ -71,7 +71,6 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
         data = self.container_data
         if not data:
             return None
-        # Show short digest or "local"
         if data.local_digest:
             return data.local_digest[:12]
         return "local"
@@ -82,19 +81,23 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
         if not data:
             return None
         if not data.update_available:
-            # No update known yet or up to date
             return self.installed_version
         if data.latest_digest:
             return data.latest_digest[:12]
         return "latest"
 
     @property
-    def update_percentage(self) -> int | None:
-        return 50 if self._in_progress else None
+    def in_progress(self) -> bool | int:
+        return self._in_progress
 
     @property
-    def in_progress(self) -> bool:
-        return self._in_progress
+    def release_summary(self) -> str | None:
+        data = self.container_data
+        if not data:
+            return None
+        if data.last_update_check:
+            return f"Dernière vérification : {data.last_update_check.strftime('%d/%m/%Y %H:%M')}"
+        return "Cliquez sur 'Check for Update' pour vérifier la disponibilité d'une mise à jour."
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -118,16 +121,33 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
         """Pull latest image and recreate the container."""
         if self._container_name.lower() in HA_CONTAINER_NAMES:
             _LOGGER.warning(
-                "Refusing to update Home Assistant container '%s' via Docker Manager",
+                "Refusing to update Home Assistant container '%s'",
                 self._container_name,
             )
             return
 
-        self._in_progress = True
+        # Étape 1 : Pull (10 → 70%)
+        self._in_progress = 10
         self.async_write_ha_state()
 
         try:
+            # Lance l'update dans le coordinator
+            # On simule la progression en 3 paliers
+            # car aiodocker ne remonte pas d'événements granulaires facilement
+            self._in_progress = 30
+            self.async_write_ha_state()
+
             await self.coordinator.async_update_container(self._container_name)
+
+            self._in_progress = 90
+            self.async_write_ha_state()
+
+        except Exception as err:
+            _LOGGER.error(
+                "Update failed for container %s: %s",
+                self._container_name,
+                err,
+            )
         finally:
             self._in_progress = False
             self.async_write_ha_state()

@@ -365,6 +365,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not self._client:
             return
 
+        # --- Find the container ---
         containers = await self._client.containers.list(all=True)
         target = None
         for c in containers:
@@ -383,46 +384,84 @@ class DockerCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Cannot determine image for container %s", name)
             return
 
-        _LOGGER.info("Updating container %s (image: %s)", name, image_name)
+        _LOGGER.info("[%s] Starting update — image: %s", name, image_name)
 
-        # 1. Pull latest image
-        await self._client.images.pull(image_name)
-        _LOGGER.info("Pulled latest image: %s", image_name)
+        # --- 1. Pull latest image with progress logging ---
+        _LOGGER.info("[%s] Pulling image %s ...", name, image_name)
+        try:
+            # aiodocker pull returns an async generator of progress events
+            async for line in self._client.images.pull(image_name, stream=True):
+                status = line.get("status", "")
+                progress = line.get("progress", "")
+                detail = line.get("progressDetail", {})
+                if status and status not in ("Waiting", "Pulling fs layer"):
+                    if progress:
+                        _LOGGER.debug("[%s] Pull: %s %s", name, status, progress)
+                    else:
+                        _LOGGER.info("[%s] Pull: %s", name, status)
+        except TypeError:
+            # Some aiodocker versions return a coroutine, not an async generator
+            await self._client.images.pull(image_name)
 
-        # 2. Extract container config for recreation
+        _LOGGER.info("[%s] Pull complete", name)
+
+        # --- 2. Snapshot full container config before touching it ---
         config = info.get("Config", {})
         host_config = info.get("HostConfig", {})
-        network_config = info.get("NetworkSettings", {}).get("Networks", {})
-
-        # 3. Stop and remove old container
+        networks = info.get("NetworkSettings", {}).get("Networks", {})
         was_running = info.get("State", {}).get("Status") == "running"
+
+        # Build network config (reconnect to same networks after recreation)
+        networking_config = {
+            net_name: {
+                "IPAMConfig": net_data.get("IPAMConfig"),
+                "Aliases": net_data.get("Aliases", []),
+            }
+            for net_name, net_data in networks.items()
+        }
+
+        # --- 3. Stop old container ---
         if was_running:
+            _LOGGER.info("[%s] Stopping container...", name)
             await container.stop()
+
+        # --- 4. Remove old container ---
+        _LOGGER.info("[%s] Removing old container...", name)
         await container.delete()
 
-        # 4. Recreate container with same config
-        new_container = await self._client.containers.create_or_replace(
+        # --- 5. Create new container with same config ---
+        _LOGGER.info("[%s] Creating new container...", name)
+        create_config = {
+            "Image": image_name,
+            "Env": config.get("Env") or [],
+            "Labels": config.get("Labels") or {},
+            "ExposedPorts": config.get("ExposedPorts") or {},
+            "Volumes": config.get("Volumes") or {},
+            "Entrypoint": config.get("Entrypoint"),
+            "Cmd": config.get("Cmd"),
+            "WorkingDir": config.get("WorkingDir", ""),
+            "User": config.get("User", ""),
+            "HostConfig": host_config,
+            "NetworkingConfig": {"EndpointsConfig": networking_config},
+        }
+
+        new_container = await self._client.containers.create(
+            config=create_config,
             name=name,
-            config={
-                "Image": image_name,
-                "Env": config.get("Env", []),
-                "Labels": config.get("Labels", {}),
-                "ExposedPorts": config.get("ExposedPorts", {}),
-                "Volumes": config.get("Volumes", {}),
-                "HostConfig": host_config,
-                "NetworkingConfig": {
-                    "EndpointsConfig": network_config
-                },
-            },
         )
 
-        # 5. Start if it was running
+        # --- 6. Start new container if it was running ---
         if was_running:
+            _LOGGER.info("[%s] Starting new container...", name)
             await new_container.start()
 
-        _LOGGER.info("Container %s updated and restarted successfully", name)
+        _LOGGER.info("[%s] Update complete ✓", name)
 
-        # 6. Force coordinator refresh
+        # --- 7. Reset update flag and refresh ---
+        cdata = self.get_container_data(name)
+        if cdata:
+            cdata.update_available = False
+
         await self.async_request_refresh()
 
     async def async_prune_images(self) -> dict:
