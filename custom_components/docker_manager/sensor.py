@@ -119,6 +119,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
         name="Started At",
         icon="mdi:clock-start",
         device_class=SensorDeviceClass.TIMESTAMP,
+        # started_at is already a timezone-aware datetime (or None if never started)
         value_fn=lambda d: d.started_at,
     ),
     ContainerSensorDescription(

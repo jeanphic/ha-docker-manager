@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta, datetime, timezone
 from typing import Any
 
@@ -32,7 +33,9 @@ class ContainerData:
         self.state: str = info.get("State", {}).get("Status", "unknown")
         self.status: str = info.get("Status", "")
         self.health: str = self._extract_health(info)
-        self.started_at: str = info.get("State", {}).get("StartedAt", "")
+        self.started_at: datetime | None = self._parse_docker_datetime(
+            info.get("State", {}).get("StartedAt", "")
+        )
         self.created: str = info.get("Created", "")
 
         # Stats (may be None if container is stopped)
@@ -66,6 +69,27 @@ class ContainerData:
     def _extract_health(info: dict) -> str:
         health = info.get("State", {}).get("Health", {})
         return health.get("Status", "none") if health else "none"
+
+    @staticmethod
+    def _parse_docker_datetime(dt_str: str) -> datetime | None:
+        """Parse Docker datetime string to aware datetime.
+
+        Docker returns nanosecond precision ISO strings like:
+          2026-05-31T15:02:05.702900281Z
+        Python's fromisoformat only handles up to microseconds (6 digits),
+        so we truncate the sub-second part to 6 digits before parsing.
+        Returns None for zero/empty values (container never started).
+        """
+        if not dt_str or dt_str.startswith("0001-01-01"):
+            return None
+        try:
+            # Truncate nanoseconds to microseconds (keep only 6 sub-second digits)
+            normalized = re.sub(r'(\.\d{6})\d+', r'\1', dt_str)
+            # Replace trailing Z with +00:00 for fromisoformat compatibility
+            normalized = normalized.replace("Z", "+00:00")
+            return datetime.fromisoformat(normalized)
+        except Exception:
+            return None
 
     def _parse_stats(self, stats: dict) -> None:
         """Parse Docker stats API response."""
