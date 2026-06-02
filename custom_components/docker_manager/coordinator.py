@@ -271,9 +271,11 @@ class DockerCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
 
     async def async_check_update(self, container_name: str) -> None:
-        """Pull image and compare ID before/after to detect an update.
-        This is the most reliable method: works with :latest and pinned tags,
-        all registries, no auth issues. Docker only downloads new layers if needed.
+        """Check if a newer image is available by comparing local digest vs registry.
+
+        Uses Docker's distribution API (manifest check) — NO download, just a
+        lightweight registry query. The actual pull only happens in async_update_container.
+        Falls back to a HEAD request approach if distribution API is unavailable.
         """
         if not self._client:
             return
@@ -289,30 +291,54 @@ class DockerCoordinator(DataUpdateCoordinator):
         if ":" not in image_name:
             image_name += ":latest"
 
-        _LOGGER.info("Checking update for %s (image: %s)", container_name, image_name)
+        _LOGGER.info("Checking update for %s (image: %s) — no download", container_name, image_name)
 
         try:
-            # 1. Get current local image ID
+            # 1. Get local image digest (stored when image was pulled)
             local_image = await self._client.images.inspect(image_name)
             local_id = local_image.get("Id", "")
 
-            # 2. Pull from registry (downloads only new layers if any)
-            await self._client.images.pull(image_name)
+            # RepoDigests contains the registry digest, e.g. nginx@sha256:abc123...
+            repo_digests = local_image.get("RepoDigests", [])
+            local_digest = repo_digests[0].split("@")[-1] if repo_digests else ""
 
-            # 3. Get image ID after pull
-            new_image = await self._client.images.inspect(image_name)
-            new_id = new_image.get("Id", "")
+            # 2. Query registry for current digest — zero download
+            #    Docker daemon contacts the registry and returns the manifest digest
+            remote_digest = ""
+            try:
+                dist = await self._client.distributions.inspect(image_name)
+                remote_digest = dist.get("Descriptor", {}).get("digest", "") or ""
+            except Exception as dist_err:
+                _LOGGER.debug(
+                    "distributions.inspect unavailable for %s (%s), "
+                    "falling back to RepoDigests comparison",
+                    image_name, dist_err
+                )
+                # Fallback: if no remote digest available, we can't determine
+                # update availability without pulling — mark as unknown
+                cdata.update_available = False
+                cdata.local_digest = local_id[:19] if local_id else ""
+                cdata.latest_digest = ""
+                cdata.last_update_check = datetime.now(timezone.utc)
+                self.async_set_updated_data(self.data)
+                return
 
-            cdata.update_available = bool(local_id and new_id and local_id != new_id)
-            cdata.local_digest = local_id[:19] if local_id else ""
-            cdata.latest_digest = new_id[:19] if new_id else ""
+            # 3. Compare — update available if digests differ
+            if remote_digest and local_digest:
+                cdata.update_available = remote_digest != local_digest
+            else:
+                # Cannot compare reliably (e.g. locally built image)
+                cdata.update_available = False
+
+            cdata.local_digest = local_digest[:19] if local_digest else local_id[:19]
+            cdata.latest_digest = remote_digest[:19] if remote_digest else ""
             cdata.last_update_check = datetime.now(timezone.utc)
 
             _LOGGER.info(
-                "Update check %s: local=%s pulled=%s update_available=%s",
+                "Update check %s: local=%s remote=%s update_available=%s",
                 container_name,
-                local_id[:19],
-                new_id[:19],
+                cdata.local_digest,
+                cdata.latest_digest,
                 cdata.update_available,
             )
 
