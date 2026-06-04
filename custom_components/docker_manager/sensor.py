@@ -10,6 +10,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorDeviceClass,
     SensorStateClass,
+    EntityCategory,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -24,6 +25,31 @@ from .coordinator import DockerCoordinator, ContainerData
 from .entity import DockerBaseEntity, DockerContainerEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------ #
+# Status helper
+# ------------------------------------------------------------------ #
+
+def _format_status(d: ContainerData) -> str | None:
+    """Return a human-readable status string from Docker state info.
+
+    Docker's raw 'Status' field (e.g. 'Up 3 days', 'Exited (0) 2 hours ago')
+    can be empty for freshly created containers. We build a fallback from state.
+    """
+    raw = (d.status or "").strip()
+    if raw:
+        return raw
+    # Fallback based on state
+    state_labels = {
+        "running":    "En cours",
+        "paused":     "En pause",
+        "exited":     "Arrêté",
+        "dead":       "Mort",
+        "created":    "Créé",
+        "restarting": "Redémarrage",
+        "removing":   "Suppression",
+    }
+    return state_labels.get(d.state, d.state or None)
 
 
 # ------------------------------------------------------------------ #
@@ -75,6 +101,7 @@ GLOBAL_SENSORS: tuple[GlobalSensorDescription, ...] = (
         key="docker_version",
         name="Docker Version",
         icon=ICON_DOCKER,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda c: c.docker_version,
     ),
 )
@@ -90,36 +117,44 @@ class ContainerSensorDescription(SensorEntityDescription):
 
 
 CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
+
+    # --- Capteurs (primary info) ---
     ContainerSensorDescription(
         key="state",
-        name="State",
+        name="État",
         icon=ICON_CONTAINER,
+        # No entity_category → appears in main "Capteurs" section
         value_fn=lambda d: d.state,
-    ),
-    ContainerSensorDescription(
-        key="status",
-        name="Status",
-        icon=ICON_CONTAINER,
-        value_fn=lambda d: d.status,
     ),
     ContainerSensorDescription(
         key="image",
         name="Image",
         icon="mdi:layers",
+        # No entity_category → appears in main "Capteurs" section
         value_fn=lambda d: d.image,
+    ),
+
+    # --- Diagnostic ---
+    ContainerSensorDescription(
+        key="status",
+        name="Statut",
+        icon="mdi:information-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_format_status,
     ),
     ContainerSensorDescription(
         key="health",
-        name="Health",
+        name="Santé",
         icon="mdi:heart-pulse",
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.health,
     ),
     ContainerSensorDescription(
         key="uptime",
-        name="Started At",
+        name="Démarré le",
         icon="mdi:clock-start",
         device_class=SensorDeviceClass.TIMESTAMP,
-        # started_at is already a timezone-aware datetime (or None if never started)
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.started_at,
     ),
     ContainerSensorDescription(
@@ -128,54 +163,61 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
         icon=ICON_CPU,
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.cpu_percent,
     ),
     ContainerSensorDescription(
         key="memory_mb",
-        name="Memory",
+        name="Mémoire",
         icon=ICON_MEMORY,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.memory_mb,
     ),
     ContainerSensorDescription(
         key="memory_percent",
-        name="Memory %",
+        name="Mémoire %",
         icon=ICON_MEMORY,
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.memory_percent,
     ),
     ContainerSensorDescription(
         key="net_speed_up",
-        name="Network Up",
+        name="Réseau montant",
         icon=ICON_NETWORK,
         native_unit_of_measurement="kB/s",
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.net_speed_up,
     ),
     ContainerSensorDescription(
         key="net_speed_down",
-        name="Network Down",
+        name="Réseau descendant",
         icon=ICON_NETWORK,
         native_unit_of_measurement="kB/s",
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.net_speed_down,
     ),
     ContainerSensorDescription(
         key="net_total_up",
-        name="Network Total Up",
+        name="Réseau total montant",
         icon=ICON_NETWORK,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.net_total_up,
     ),
     ContainerSensorDescription(
         key="net_total_down",
-        name="Network Total Down",
+        name="Réseau total descendant",
         icon=ICON_NETWORK,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.net_total_down,
     ),
 )
@@ -191,18 +233,15 @@ async def async_setup_entry(
 
     entities: list = []
 
-    # Global sensors
     for desc in GLOBAL_SENSORS:
         entities.append(DockerGlobalSensor(coordinator, desc))
 
-    # Per-container sensors
     for container_name in coordinator.data or {}:
         for desc in CONTAINER_SENSORS:
             entities.append(DockerContainerSensor(coordinator, container_name, desc))
 
     async_add_entities(entities)
 
-    # Dynamic addition of new containers
     def _handle_coordinator_update() -> None:
         new_entities = []
         existing = {e.unique_id for e in entities}
@@ -224,11 +263,7 @@ class DockerGlobalSensor(DockerBaseEntity, SensorEntity):
 
     entity_description: GlobalSensorDescription
 
-    def __init__(
-        self,
-        coordinator: DockerCoordinator,
-        description: GlobalSensorDescription,
-    ) -> None:
+    def __init__(self, coordinator: DockerCoordinator, description: GlobalSensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.entry_id}_global_{description.key}"
@@ -252,9 +287,7 @@ class DockerContainerSensor(DockerContainerEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, container_name)
         self.entity_description = description
-        self._attr_unique_id = (
-            f"{coordinator.entry_id}_{container_name}_{description.key}"
-        )
+        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_{description.key}"
         self._attr_name = description.name
 
     @property

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -54,7 +55,8 @@ class DockerRestartButton(DockerContainerEntity, ButtonEntity):
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
         self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_restart"
-        self._attr_name = "Restart"
+        self._attr_name = "Redémarrer"
+        self._attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:
         if self._container_name.lower() in HA_CONTAINER_NAMES:
@@ -79,7 +81,8 @@ class DockerCheckUpdateButton(DockerContainerEntity, ButtonEntity):
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
         self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_check_update"
-        self._attr_name = "Check for Update"
+        self._attr_name = "Vérifier mise à jour"
+        self._attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:
         """Trigger an update check for this container."""
