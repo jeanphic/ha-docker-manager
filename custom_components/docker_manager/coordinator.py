@@ -6,6 +6,7 @@ import re
 from datetime import timedelta, datetime, timezone
 from typing import Any
 
+import aiohttp
 import aiodocker
 from aiodocker.exceptions import DockerError
 
@@ -270,12 +271,160 @@ class DockerCoordinator(DataUpdateCoordinator):
     # Update check (digest comparison)
     # ------------------------------------------------------------------ #
 
-    async def async_check_update(self, container_name: str) -> None:
-        """Check if a newer image is available by comparing local digest vs registry.
+    # ------------------------------------------------------------------ #
+    # Registry digest helpers (no pull, no download)
+    # ------------------------------------------------------------------ #
 
-        Uses Docker's distribution API (manifest check) — NO download, just a
-        lightweight registry query. The actual pull only happens in async_update_container.
-        Falls back to a HEAD request approach if distribution API is unavailable.
+    @staticmethod
+    def _parse_image_ref(image_name: str) -> tuple[str, str, str]:
+        """Parse image reference into (registry, repository, tag).
+
+        Examples:
+          nginx                        → docker.io, library/nginx, latest
+          nginx:1.25                   → docker.io, library/nginx, 1.25
+          ghcr.io/user/repo:latest     → ghcr.io, user/repo, latest
+          myregistry.com/img:tag       → myregistry.com, img, tag
+        """
+        tag = "latest"
+        if ":" in image_name.split("/")[-1]:
+            image_name, tag = image_name.rsplit(":", 1)
+
+        known_registries = ("ghcr.io", "gcr.io", "quay.io", "mcr.microsoft.com", "lscr.io")
+        if "/" in image_name and image_name.split("/")[0] in known_registries:
+            parts = image_name.split("/", 1)
+            return parts[0], parts[1], tag
+
+        # Default: Docker Hub
+        if "/" not in image_name:
+            # Official image (e.g. nginx → library/nginx)
+            return "docker.io", f"library/{image_name}", tag
+        return "docker.io", image_name, tag
+
+    async def _get_remote_digest(self, image_name: str) -> str | None:
+        """Get the remote digest for an image without downloading it.
+
+        Tries in order:
+        1. Docker daemon distributions.inspect (works when daemon has auth token cached)
+        2. Direct registry API call (works for public images on Docker Hub, GHCR, etc.)
+
+        Returns the digest string (sha256:...) or None if unavailable.
+        """
+        # --- Method 1: Docker daemon distributions API ---
+        try:
+            dist = await self._client.distributions.inspect(image_name)
+            digest = dist.get("Descriptor", {}).get("digest", "") or ""
+            if digest:
+                _LOGGER.debug("Got remote digest via distributions.inspect: %s", digest[:19])
+                return digest
+        except Exception as e:
+            _LOGGER.debug("distributions.inspect failed (%s), trying registry API", e)
+
+        # --- Method 2: Direct registry API (no auth for public images) ---
+        registry, repo, tag = self._parse_image_ref(image_name)
+
+        try:
+            if registry == "docker.io":
+                return await self._get_dockerhub_digest(repo, tag)
+            elif registry == "ghcr.io":
+                return await self._get_ghcr_digest(repo, tag)
+            else:
+                return await self._get_generic_registry_digest(registry, repo, tag)
+        except Exception as e:
+            _LOGGER.debug("Registry API failed for %s: %s", image_name, e)
+            return None
+
+    @staticmethod
+    async def _get_dockerhub_digest(repo: str, tag: str) -> str | None:
+        """Get digest from Docker Hub API (no auth needed for public images)."""
+        # Step 1: get anonymous token
+        auth_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(auth_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return None
+                token_data = await resp.json()
+                token = token_data.get("token", "")
+
+            # Step 2: fetch manifest digest (HEAD request — no layer download)
+            manifest_url = f"https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": (
+                    "application/vnd.docker.distribution.manifest.v2+json,"
+                    "application/vnd.oci.image.manifest.v1+json,"
+                    "application/vnd.docker.distribution.manifest.list.v2+json,"
+                    "application/vnd.oci.image.index.v1+json"
+                ),
+            }
+            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    digest = resp.headers.get("Docker-Content-Digest", "")
+                    _LOGGER.debug("Docker Hub digest for %s:%s → %s", repo, tag, digest[:19] if digest else "none")
+                    return digest or None
+        return None
+
+    @staticmethod
+    async def _get_ghcr_digest(repo: str, tag: str) -> str | None:
+        """Get digest from GitHub Container Registry (public images, no auth)."""
+        async with aiohttp.ClientSession() as session:
+            # GHCR accepts anonymous for public images
+            manifest_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
+            headers = {
+                "Accept": (
+                    "application/vnd.docker.distribution.manifest.v2+json,"
+                    "application/vnd.oci.image.manifest.v1+json,"
+                    "application/vnd.docker.distribution.manifest.list.v2+json,"
+                    "application/vnd.oci.image.index.v1+json"
+                ),
+            }
+            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 401:
+                    # Need token
+                    www_auth = resp.headers.get("Www-Authenticate", "")
+                    realm, service, scope = "", "", ""
+                    for part in www_auth.replace("Bearer ", "").split(","):
+                        k, _, v = part.partition("=")
+                        v = v.strip('"')
+                        if k == "realm": realm = v
+                        elif k == "service": service = v
+                        elif k == "scope": scope = v
+                    if realm:
+                        token_url = f"{realm}?service={service}&scope={scope}"
+                        async with session.get(token_url, timeout=aiohttp.ClientTimeout(total=10)) as tresp:
+                            token = (await tresp.json()).get("token", "")
+                        headers["Authorization"] = f"Bearer {token}"
+                        async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
+                            return resp2.headers.get("Docker-Content-Digest") or None
+                elif resp.status == 200:
+                    return resp.headers.get("Docker-Content-Digest") or None
+        return None
+
+    @staticmethod
+    async def _get_generic_registry_digest(registry: str, repo: str, tag: str) -> str | None:
+        """Get digest from a generic OCI-compliant registry."""
+        async with aiohttp.ClientSession() as session:
+            manifest_url = f"https://{registry}/v2/{repo}/manifests/{tag}"
+            headers = {
+                "Accept": (
+                    "application/vnd.docker.distribution.manifest.v2+json,"
+                    "application/vnd.oci.image.manifest.v1+json"
+                ),
+            }
+            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    return resp.headers.get("Docker-Content-Digest") or None
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Update check
+    # ------------------------------------------------------------------ #
+
+    async def async_check_update(self, container_name: str) -> None:
+        """Check if a newer image is available — zero download, pure API calls.
+
+        1. Get local digest from Docker inspect (RepoDigests)
+        2. Get remote digest via distributions.inspect or direct registry API
+        3. Compare — no pull, no layer download
         """
         if not self._client:
             return
@@ -294,51 +443,46 @@ class DockerCoordinator(DataUpdateCoordinator):
         _LOGGER.info("Checking update for %s (image: %s) — no download", container_name, image_name)
 
         try:
-            # 1. Get local image digest (stored when image was pulled)
+            # 1. Local digest
             local_image = await self._client.images.inspect(image_name)
-            local_id = local_image.get("Id", "")
-
-            # RepoDigests contains the registry digest, e.g. nginx@sha256:abc123...
             repo_digests = local_image.get("RepoDigests", [])
             local_digest = repo_digests[0].split("@")[-1] if repo_digests else ""
+            local_id = local_image.get("Id", "")
 
-            # 2. Query registry for current digest — zero download
-            #    Docker daemon contacts the registry and returns the manifest digest
-            remote_digest = ""
-            try:
-                dist = await self._client.distributions.inspect(image_name)
-                remote_digest = dist.get("Descriptor", {}).get("digest", "") or ""
-            except Exception as dist_err:
+            if not local_digest:
                 _LOGGER.debug(
-                    "distributions.inspect unavailable for %s (%s), "
-                    "falling back to RepoDigests comparison",
-                    image_name, dist_err
+                    "No RepoDigest for %s (locally built or never pulled from registry) — cannot check",
+                    image_name
                 )
-                # Fallback: if no remote digest available, we can't determine
-                # update availability without pulling — mark as unknown
                 cdata.update_available = False
-                cdata.local_digest = local_id[:19] if local_id else ""
-                cdata.latest_digest = ""
                 cdata.last_update_check = datetime.now(timezone.utc)
                 self.async_set_updated_data(self.data)
                 return
 
-            # 3. Compare — update available if digests differ
-            if remote_digest and local_digest:
-                cdata.update_available = remote_digest != local_digest
-            else:
-                # Cannot compare reliably (e.g. locally built image)
-                cdata.update_available = False
+            # 2. Remote digest (no download)
+            remote_digest = await self._get_remote_digest(image_name)
 
-            cdata.local_digest = local_digest[:19] if local_digest else local_id[:19]
-            cdata.latest_digest = remote_digest[:19] if remote_digest else ""
+            if not remote_digest:
+                _LOGGER.warning(
+                    "Could not retrieve remote digest for %s — update check inconclusive",
+                    image_name
+                )
+                cdata.update_available = False
+                cdata.last_update_check = datetime.now(timezone.utc)
+                self.async_set_updated_data(self.data)
+                return
+
+            # 3. Compare
+            cdata.update_available = local_digest != remote_digest
+            cdata.local_digest = local_digest[:19]
+            cdata.latest_digest = remote_digest[:19]
             cdata.last_update_check = datetime.now(timezone.utc)
 
             _LOGGER.info(
-                "Update check %s: local=%s remote=%s update_available=%s",
+                "Update check %s: local=%s remote=%s available=%s",
                 container_name,
-                cdata.local_digest,
-                cdata.latest_digest,
+                local_digest[:19],
+                remote_digest[:19],
                 cdata.update_available,
             )
 

@@ -1,10 +1,15 @@
 {
   "domain": "docker_manager",
   "name": "Docker Manager",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "config_flow": true,
-  "requirements": ["aiodocker==0.21.0"],
-  "codeowners": ["@jeanphic"],
+  "requirements": [
+    "aiodocker==0.21.0",
+    "aiohttp>=3.9.0"
+  ],
+  "codeowners": [
+    "@jeanphic"
+  ],
   "iot_class": "local_polling",
   "documentation": "https://github.com/jeanphic/ha-docker-manager",
   "issue_tracker": "https://github.com/jeanphic/ha-docker-manager/issues"
