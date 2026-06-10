@@ -401,18 +401,88 @@ class DockerCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     async def _get_generic_registry_digest(registry: str, repo: str, tag: str) -> str | None:
-        """Get digest from a generic OCI-compliant registry."""
+        """Get digest from any OCI-compliant registry with automatic Bearer auth.
+
+        Handles registries that require a Bearer token challenge (lscr.io, quay.io,
+        gcr.io, mcr.microsoft.com, etc.) by parsing the WWW-Authenticate header
+        on a 401 response and fetching an anonymous token.
+        """
+        manifest_url = f"https://{registry}/v2/{repo}/manifests/{tag}"
+        accept_header = (
+            "application/vnd.docker.distribution.manifest.v2+json,"
+            "application/vnd.oci.image.manifest.v1+json,"
+            "application/vnd.docker.distribution.manifest.list.v2+json,"
+            "application/vnd.oci.image.index.v1+json"
+        )
+
         async with aiohttp.ClientSession() as session:
-            manifest_url = f"https://{registry}/v2/{repo}/manifests/{tag}"
-            headers = {
-                "Accept": (
-                    "application/vnd.docker.distribution.manifest.v2+json,"
-                    "application/vnd.oci.image.manifest.v1+json"
-                ),
-            }
-            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            headers = {"Accept": accept_header}
+
+            # First attempt — anonymous
+            async with session.head(
+                manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 if resp.status == 200:
                     return resp.headers.get("Docker-Content-Digest") or None
+
+                if resp.status != 401:
+                    _LOGGER.debug(
+                        "Registry %s returned %s for %s:%s",
+                        registry, resp.status, repo, tag
+                    )
+                    return None
+
+                # Parse WWW-Authenticate: Bearer realm="...",service="...",scope="..."
+                www_auth = resp.headers.get("Www-Authenticate", "")
+
+            if not www_auth.startswith("Bearer "):
+                return None
+
+            params: dict[str, str] = {}
+            for part in www_auth[len("Bearer "):].split(","):
+                k, _, v = part.strip().partition("=")
+                params[k.strip()] = v.strip().strip('"')
+
+            realm = params.get("realm", "")
+            if not realm:
+                return None
+
+            # Fetch anonymous token from the registry's auth server
+            token_params = {}
+            if "service" in params:
+                token_params["service"] = params["service"]
+            if "scope" in params:
+                token_params["scope"] = params["scope"]
+
+            async with session.get(
+                realm, params=token_params, timeout=aiohttp.ClientTimeout(total=10)
+            ) as tresp:
+                if tresp.status != 200:
+                    _LOGGER.debug("Token fetch failed for %s: %s", registry, tresp.status)
+                    return None
+                token_data = await tresp.json()
+                token = token_data.get("token") or token_data.get("access_token", "")
+
+            if not token:
+                return None
+
+            # Second attempt — with Bearer token
+            headers["Authorization"] = f"Bearer {token}"
+            async with session.head(
+                manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp2:
+                if resp2.status == 200:
+                    digest = resp2.headers.get("Docker-Content-Digest", "")
+                    _LOGGER.debug(
+                        "Got digest for %s/%s:%s via Bearer auth → %s",
+                        registry, repo, tag, digest[:19] if digest else "none"
+                    )
+                    return digest or None
+                _LOGGER.debug(
+                    "Registry %s returned %s after auth for %s:%s",
+                    registry, resp2.status, repo, tag
+                )
+
         return None
 
     # ------------------------------------------------------------------ #
