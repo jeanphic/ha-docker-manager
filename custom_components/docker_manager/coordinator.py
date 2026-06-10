@@ -233,7 +233,11 @@ class DockerCoordinator(DataUpdateCoordinator):
                     result[cdata.name] = cdata
 
                 except DockerError as err:
-                    _LOGGER.warning("Error fetching container data: %s", err)
+                    if err.status == 404:
+                        # Container disappeared temporarily (e.g. during update — normal)
+                        _LOGGER.debug("Container not found during poll (transient): %s", err)
+                    else:
+                        _LOGGER.warning("Error fetching container data: %s", err)
 
             return result
 
