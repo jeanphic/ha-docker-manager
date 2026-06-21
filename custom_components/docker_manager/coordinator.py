@@ -600,7 +600,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                 await c.restart()
                 return
 
-    async def async_update_container(self, name: str) -> None:
+    async def async_update_container(self, name: str, progress_callback=None) -> None:
         """Pull latest image and recreate the container preserving its config."""
         if self._is_ha_container(name):
             _LOGGER.warning("Refusing to update Home Assistant container via Docker Manager")
@@ -630,24 +630,27 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         _LOGGER.info("[%s] Starting update — image: %s", name, image_name)
 
+        async def _cb(percent: int, label: str) -> None:
+            if progress_callback:
+                await progress_callback(percent, label)
+
         # --- 1. Pull latest image with progress logging ---
+        await _cb(15, "⏳ Pulling image...")
         _LOGGER.info("[%s] Pulling image %s ...", name, image_name)
         try:
-            # aiodocker pull returns an async generator of progress events
             async for line in self._client.images.pull(image_name, stream=True):
                 status = line.get("status", "")
                 progress = line.get("progress", "")
-                detail = line.get("progressDetail", {})
                 if status and status not in ("Waiting", "Pulling fs layer"):
                     if progress:
                         _LOGGER.debug("[%s] Pull: %s %s", name, status, progress)
                     else:
                         _LOGGER.info("[%s] Pull: %s", name, status)
         except TypeError:
-            # Some aiodocker versions return a coroutine, not an async generator
             await self._client.images.pull(image_name)
 
         _LOGGER.info("[%s] Pull complete", name)
+        await _cb(50, "⏳ Pull complete — preparing...")
 
         # --- 2. Snapshot full container config before touching it ---
         config = info.get("Config", {})
@@ -666,14 +669,17 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         # --- 3. Stop old container ---
         if was_running:
+            await _cb(60, "⏸️ Stopping container...")
             _LOGGER.info("[%s] Stopping container...", name)
             await container.stop()
 
         # --- 4. Remove old container ---
+        await _cb(70, "🗑️ Removing old container...")
         _LOGGER.info("[%s] Removing old container...", name)
         await container.delete()
 
         # --- 5. Create new container with same config ---
+        await _cb(80, "🔨 Creating new container...")
         _LOGGER.info("[%s] Creating new container...", name)
         create_config = {
             "Image": image_name,
@@ -696,6 +702,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         # --- 6. Start new container if it was running ---
         if was_running:
+            await _cb(90, "▶️ Starting container...")
             _LOGGER.info("[%s] Starting new container...", name)
             await new_container.start()
 

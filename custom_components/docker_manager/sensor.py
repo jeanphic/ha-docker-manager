@@ -41,13 +41,13 @@ def _format_status(d: ContainerData) -> str | None:
         return raw
     # Fallback based on state
     state_labels = {
-        "running":    "En cours",
-        "paused":     "En pause",
-        "exited":     "Arrêté",
-        "dead":       "Mort",
-        "created":    "Créé",
-        "restarting": "Redémarrage",
-        "removing":   "Suppression",
+        "running":    "Running",
+        "paused":     "Paused",
+        "exited":     "Stopped",
+        "dead":       "Dead",
+        "created":    "Created",
+        "restarting": "Restarting",
+        "removing":   "Removing",
     }
     return state_labels.get(d.state, d.state or None)
 
@@ -121,7 +121,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     # --- Capteurs (primary info) ---
     ContainerSensorDescription(
         key="state",
-        name="État",
+        name="State",
         icon=ICON_CONTAINER,
         # No entity_category → appears in main "Capteurs" section
         value_fn=lambda d: d.state,
@@ -137,21 +137,21 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     # --- Diagnostic ---
     ContainerSensorDescription(
         key="status",
-        name="Statut",
+        name="Status",
         icon="mdi:information-outline",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_format_status,
     ),
     ContainerSensorDescription(
         key="health",
-        name="Santé",
+        name="Health",
         icon="mdi:heart-pulse",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.health,
     ),
     ContainerSensorDescription(
         key="uptime",
-        name="Démarré le",
+        name="Started At",
         icon="mdi:clock-start",
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -168,7 +168,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     ),
     ContainerSensorDescription(
         key="memory_mb",
-        name="Mémoire",
+        name="Memory",
         icon=ICON_MEMORY,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         state_class=SensorStateClass.MEASUREMENT,
@@ -177,7 +177,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     ),
     ContainerSensorDescription(
         key="memory_percent",
-        name="Mémoire %",
+        name="Memory %",
         icon=ICON_MEMORY,
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -186,7 +186,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     ),
     ContainerSensorDescription(
         key="net_speed_up",
-        name="Réseau montant",
+        name="Network Up",
         icon=ICON_NETWORK,
         native_unit_of_measurement="kB/s",
         state_class=SensorStateClass.MEASUREMENT,
@@ -195,7 +195,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     ),
     ContainerSensorDescription(
         key="net_speed_down",
-        name="Réseau descendant",
+        name="Network Down",
         icon=ICON_NETWORK,
         native_unit_of_measurement="kB/s",
         state_class=SensorStateClass.MEASUREMENT,
@@ -204,7 +204,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     ),
     ContainerSensorDescription(
         key="net_total_up",
-        name="Réseau total montant",
+        name="Network Total Up",
         icon=ICON_NETWORK,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -213,7 +213,7 @@ CONTAINER_SENSORS: tuple[ContainerSensorDescription, ...] = (
     ),
     ContainerSensorDescription(
         key="net_total_down",
-        name="Réseau total descendant",
+        name="Network Total Down",
         icon=ICON_NETWORK,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         state_class=SensorStateClass.TOTAL_INCREASING,

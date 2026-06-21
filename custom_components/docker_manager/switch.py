@@ -50,7 +50,7 @@ class DockerContainerSwitch(DockerContainerEntity, SwitchEntity):
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
         self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_switch"
-        self._attr_name = "Conteneur"
+        self._attr_name = "Container"
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property

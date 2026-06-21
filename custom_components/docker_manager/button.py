@@ -55,7 +55,7 @@ class DockerRestartButton(DockerContainerEntity, ButtonEntity):
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
         self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_restart"
-        self._attr_name = "Redémarrer"
+        self._attr_name = "Restart"
         self._attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:
@@ -81,7 +81,7 @@ class DockerCheckUpdateButton(DockerContainerEntity, ButtonEntity):
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
         self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_check_update"
-        self._attr_name = "Vérifier mise à jour"
+        self._attr_name = "Check for Update"
         self._attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:
