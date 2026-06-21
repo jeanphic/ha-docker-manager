@@ -1,11 +1,23 @@
 prune_images:
   name: Prune Docker Images
-  description: Remove all unused Docker images to free up disk space.
+  description: >
+    Remove unused Docker images to free up disk space.
+    By default, only dangling images (untagged layers) are removed.
+    Set all_unused to true to remove all images not used by any container.
   fields:
     entry_id:
       name: Instance
       description: Config entry ID (optional, uses default if omitted).
       required: false
-      example: "abc123def456"
       selector:
         text:
+    all_unused:
+      name: All unused images
+      description: >
+        If true, removes ALL images not used by any running or stopped container
+        (equivalent to docker image prune -a).
+        If false (default), only removes dangling/untagged images.
+      required: false
+      default: false
+      selector:
+        boolean:

@@ -66,8 +66,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --- Service: prune unused images ---
     async def handle_prune(call: ServiceCall) -> None:
         entry_id = call.data.get("entry_id", entry.entry_id)
+        all_unused = call.data.get("all_unused", False)
         coord: DockerCoordinator = hass.data[DOMAIN].get(entry_id, coordinator)
-        result = await coord.async_prune_images()
+        result = await coord.async_prune_images(all_unused=all_unused)
         _LOGGER.info(
             "Docker prune completed: %s images deleted, %s bytes reclaimed",
             len(result.get("ImagesDeleted") or []),
@@ -78,7 +79,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN,
         "prune_images",
         handle_prune,
-        schema=vol.Schema({vol.Optional("entry_id"): str}),
+        schema=vol.Schema({
+            vol.Optional("entry_id"): str,
+            vol.Optional("all_unused", default=False): bool,
+        }),
     )
 
     return True

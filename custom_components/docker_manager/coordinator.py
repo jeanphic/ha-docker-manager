@@ -715,13 +715,39 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         await self.async_request_refresh()
 
-    async def async_prune_images(self) -> dict:
-        """Remove unused Docker images."""
+    async def async_prune_images(self, all_unused: bool = False) -> dict:
+        """Remove unused Docker images.
+
+        Args:
+            all_unused: if True, remove ALL images not used by any container
+                        (equivalent to docker image prune -a).
+                        if False (default), remove only dangling images
+                        (untagged layers left after builds/updates).
+        """
         if not self._client:
             return {}
-        result = await self._client.images.prune(filters={"dangling": False})
-        await self.async_request_refresh()
-        return result
+
+        try:
+            # aiodocker requires filters as a JSON-encoded string
+            if all_unused:
+                # Remove all images not referenced by any container
+                filters = json.dumps({"dangling": ["false"]})
+            else:
+                # Remove only dangling (untagged) images — safer default
+                filters = json.dumps({"dangling": ["true"]})
+
+            result = await self._client.images.prune(filters=filters)
+            space = result.get("SpaceReclaimed", 0)
+            deleted = result.get("ImagesDeleted") or []
+            _LOGGER.info(
+                "Prune complete: %d image(s) removed, %.1f MB reclaimed",
+                len(deleted), space / (1024 * 1024)
+            )
+            await self.async_request_refresh()
+            return result
+        except Exception as err:
+            _LOGGER.error("Prune failed: %s", err)
+            return {}
 
     # ------------------------------------------------------------------ #
     # Helpers
