@@ -1,6 +1,7 @@
 """DataUpdateCoordinator for Docker Manager."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import timedelta, datetime, timezone
