@@ -40,6 +40,9 @@ jobs:
         run: |
           cd custom_components
           zip -r ../docker_manager.zip docker_manager/
+          cd ..
+          echo "ZIP contents:"
+          unzip -l docker_manager.zip | head -20
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
