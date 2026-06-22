@@ -8,6 +8,8 @@ import aiodocker
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.config_entries import OptionsFlowWithReload
+from homeassistant.config_entries import OptionsFlowWithReload
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.selector import (
@@ -216,19 +218,22 @@ class DockerManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> DockerManagerOptionsFlow:
-        return DockerManagerOptionsFlow(config_entry)
+        return DockerManagerOptionsFlow()
 
 
 # ------------------------------------------------------------------ #
 # Options flow — edit container selection + scan interval after setup
 # ------------------------------------------------------------------ #
 
-class DockerManagerOptionsFlow(config_entries.OptionsFlow):
-    """Allow changing container selection and scan interval after setup."""
+class DockerManagerOptionsFlow(OptionsFlowWithReload):
+    """Allow changing container selection and scan interval after setup.
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        super().__init__(config_entry)
-        self._available_containers: list[str] = []
+    Uses OptionsFlowWithReload so HA automatically reloads the integration
+    when options are saved — no manual update_listener needed.
+    config_entry is injected automatically by HA as a property.
+    """
+
+    _available_containers: list[str] = []
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
