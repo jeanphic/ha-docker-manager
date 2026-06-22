@@ -22,8 +22,10 @@ from .const import (
     CONF_URL,
     CONF_CONTAINERS_INCLUDE,
     CONF_SCAN_INTERVAL,
+    CONF_UPDATE_CHECK_INTERVAL,
     DEFAULT_URL,
     DEFAULT_SCAN_INTERVAL,
+    DISABLE_UPDATE_CHECK,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -267,6 +269,11 @@ class DockerManagerOptionsFlow(config_entries.OptionsFlow):
         )
         options = [SelectOptionDict(value=n, label=n) for n in all_options]
 
+        current_update_interval: int = self.config_entry.options.get(
+            CONF_UPDATE_CHECK_INTERVAL,
+            self.config_entry.data.get(CONF_UPDATE_CHECK_INTERVAL, DISABLE_UPDATE_CHECK),
+        )
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -283,6 +290,9 @@ class DockerManagerOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SCAN_INTERVAL, default=current_interval
                     ): vol.All(int, vol.Range(min=5, max=300)),
+                    vol.Optional(
+                        CONF_UPDATE_CHECK_INTERVAL, default=current_update_interval
+                    ): vol.All(int, vol.Range(min=0, max=86400)),
                 }
             ),
             description_placeholders={

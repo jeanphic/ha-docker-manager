@@ -9,10 +9,12 @@ CONF_URL = "url"
 CONF_CONTAINERS_EXCLUDE = "containers_exclude"
 CONF_CONTAINERS_INCLUDE = "containers_include"
 CONF_SCAN_INTERVAL = "scan_interval"
+CONF_UPDATE_CHECK_INTERVAL = "update_check_interval"
 
 DEFAULT_URL = "unix:///var/run/docker.sock"
 DEFAULT_SCAN_INTERVAL = 30  # seconds
 DEFAULT_UPDATE_CHECK_INTERVAL = 3600  # 1 hour
+DISABLE_UPDATE_CHECK = 0  # 0 = disabled
 
 # Container states
 STATE_RUNNING = "running"

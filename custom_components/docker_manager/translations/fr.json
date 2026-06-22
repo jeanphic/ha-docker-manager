@@ -46,7 +46,11 @@
         "description": "{count} conteneur(s) disponible(s).",
         "data": {
           "containers_include": "Conteneurs à superviser",
-          "scan_interval": "Intervalle de mise à jour (secondes)"
+          "scan_interval": "Intervalle de mise à jour (secondes)",
+          "update_check_interval": "Intervalle de vérification des mises à jour (secondes)"
+        },
+        "description_placeholders": {
+          "update_check_hint": "0 = désactivé. Ex: 3600 = toutes les heures, 86400 = tous les jours."
         }
       }
     }

@@ -14,8 +14,10 @@ from .const import (
     CONF_URL,
     CONF_CONTAINERS_INCLUDE,
     CONF_SCAN_INTERVAL,
+    CONF_UPDATE_CHECK_INTERVAL,
     DEFAULT_URL,
     DEFAULT_SCAN_INTERVAL,
+    DISABLE_UPDATE_CHECK,
 )
 from .coordinator import DockerCoordinator
 
@@ -40,12 +42,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
 
+    update_check_interval: int = int(
+        entry.options.get(
+            CONF_UPDATE_CHECK_INTERVAL,
+            entry.data.get(CONF_UPDATE_CHECK_INTERVAL, DISABLE_UPDATE_CHECK),
+        )
+    )
+
     coordinator = DockerCoordinator(
         hass,
         url,
         entry.entry_id,
         included_containers=included_containers,
         scan_interval=scan_interval,
+        update_check_interval=update_check_interval,
     )
 
     try:

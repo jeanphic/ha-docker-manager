@@ -1,6 +1,7 @@
 """DataUpdateCoordinator for Docker Manager."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -18,6 +19,7 @@ from .const import (
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
     CONF_CONTAINERS_INCLUDE,
+    DISABLE_UPDATE_CHECK,
     HA_CONTAINER_NAMES,
 )
 
@@ -140,7 +142,7 @@ class ContainerData:
 class DockerCoordinator(DataUpdateCoordinator):
     """Manages polling of Docker daemon and update checks."""
 
-    def __init__(self, hass: HomeAssistant, url: str, entry_id: str, included_containers: list[str] | None = None, scan_interval: int = DEFAULT_SCAN_INTERVAL) -> None:
+    def __init__(self, hass: HomeAssistant, url: str, entry_id: str, included_containers: list[str] | None = None, scan_interval: int = DEFAULT_SCAN_INTERVAL, update_check_interval: int = DISABLE_UPDATE_CHECK) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -151,6 +153,9 @@ class DockerCoordinator(DataUpdateCoordinator):
         self.entry_id = entry_id
         # Empty list = monitor all containers
         self.included_containers: list[str] = included_containers or []
+        # 0 = disabled, >0 = interval in seconds
+        self.update_check_interval: int = update_check_interval
+        self._update_check_task: asyncio.Task | None = None
         self._client: aiodocker.Docker | None = None
         self._prev_net: dict[str, dict] = {}
         self._prev_net_time: dict[str, datetime] = {}
@@ -170,8 +175,21 @@ class DockerCoordinator(DataUpdateCoordinator):
         self.docker_version = info.get("ServerVersion", "unknown")
         _LOGGER.info("Connected to Docker %s at %s", self.docker_version, self.url)
 
+        # Start background update check task if interval is set
+        if self.update_check_interval > 0:
+            self._update_check_task = self.hass.async_create_background_task(
+                self._periodic_update_check(),
+                f"docker_manager_update_check_{self.entry_id}",
+            )
+            _LOGGER.info(
+                "Auto update check enabled every %ds", self.update_check_interval
+            )
+
     async def async_disconnect(self) -> None:
         """Disconnect and clean up."""
+        if self._update_check_task:
+            self._update_check_task.cancel()
+            self._update_check_task = None
         if self._client:
             await self._client.close()
             self._client = None
@@ -493,6 +511,22 @@ class DockerCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
     # Update check
     # ------------------------------------------------------------------ #
+
+    async def _periodic_update_check(self) -> None:
+        """Background task: check all containers for updates at configured interval."""
+        _LOGGER.debug("Periodic update check task started (interval: %ds)", self.update_check_interval)
+        while True:
+            await asyncio.sleep(self.update_check_interval)
+            if not self.data:
+                continue
+            _LOGGER.info("Running scheduled update check for all containers...")
+            for name in list(self.data.keys()):
+                try:
+                    await self.async_check_update(name)
+                    # Small delay between containers to avoid hammering the registry
+                    await asyncio.sleep(2)
+                except Exception as err:
+                    _LOGGER.debug("Scheduled update check failed for %s: %s", name, err)
 
     async def async_check_update(self, container_name: str) -> None:
         """Check if a newer image is available — zero download, pure API calls.
