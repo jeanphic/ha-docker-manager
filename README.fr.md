@@ -1,10 +1,12 @@
-# Docker Manager for Home Assistant
+# Docker Manager pour Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/hacs/integration)
 [![GitHub Release](https://img.shields.io/github/release/jeanphic/ha-docker-manager.svg)](https://github.com/jeanphic/ha-docker-manager/releases)
 [![License](https://img.shields.io/github/license/jeanphic/ha-docker-manager.svg)](LICENSE)
 
-Supervise, contrôle et mettez à jour vos conteneurs Docker directement depuis Home Assistant.
+**Supervisez, contrôlez et mettez à jour vos conteneurs Docker directement depuis Home Assistant.**
+
+> 🇬🇧 [English documentation available here](README.md)
 
 ---
 
@@ -12,48 +14,48 @@ Supervise, contrôle et mettez à jour vos conteneurs Docker directement depuis 
 
 ### 📊 Supervision
 - État et statut de chaque conteneur (`running`, `exited`, `paused`…)
-- CPU (%), RAM (MB + %), réseau (vitesse up/down, total up/down)
-- Santé (`healthy`, `unhealthy`), uptime, image utilisée
-- Stats globales Docker : total / running / stopped / paused / images
+- CPU (%), RAM (MB + %), débit réseau (montant/descendant kB/s), totaux réseau (MB)
+- Santé, uptime, image utilisée
+- Stats globales Docker : total / running / stopped / paused, nombre d'images, version Docker
 
 ### 🎛 Contrôle
 - **Switch** start/stop par conteneur
-- **Button** restart par conteneur
-- Protection : impossible d'arrêter/redémarrer le conteneur Home Assistant lui-même
+- **Bouton** restart par conteneur
+- **Protection** : le conteneur Home Assistant ne peut pas être arrêté
 
 ### 🔄 Mises à jour
-- Détection automatique des nouvelles versions (comparaison de digest)
-- **Entité Update** native HA : affichée dans le tableau de bord Mises à jour
-- Mise à jour en un clic : pull de l'image + recréation du conteneur avec sa config d'origine (volumes, ports, env, networks)
-- Vérification toutes les heures en arrière-plan
+- **Bouton "Check for update"** par conteneur — zéro téléchargement, simple requête API registry
+  - Compatible Docker Hub, GHCR, lscr.io et tout registry OCI avec authentification Bearer
+- **Entité Update** native HA : mise à jour en un clic (pull + recréation avec config préservée)
+- Progression par étapes pendant la mise à jour
+- **Vérification automatique** : intervalle configurable en arrière-plan (désactivé par défaut)
 
 ### 🧹 Maintenance
-- **Service** `docker_manager.prune_images` : supprime toutes les images inutilisées
+- **Service** `docker_manager.prune_images` : supprime les images inutilisées
+  - `all_unused: false` (défaut) — uniquement les images sans tag (dangling)
+  - `all_unused: true` — toutes les images non utilisées par un conteneur
 
 ---
 
 ## Installation
 
 ### Via HACS (recommandé)
-1. Ouvrez HACS dans Home Assistant
-2. Intégrations → **+** → cherchez "Docker Manager"
-3. Installez et redémarrez HA
+1. HACS → Intégrations → **+** → cherchez "Docker Manager"
+2. Installez et redémarrez HA
 
 ### Manuel
-1. Copiez le dossier `custom_components/docker_manager` dans `<config>/custom_components/`
+1. Copiez `custom_components/docker_manager` dans `<config>/custom_components/`
 2. Redémarrez Home Assistant
 
 ---
 
 ## Configuration
 
-### Prérequis selon votre installation
+### Prérequis
 
-#### HA dans Docker (recommandé)
-Montez le socket Docker dans le conteneur HA :
-
+#### HA dans Docker
+Montez le socket Docker :
 ```yaml
-# docker-compose.yml
 services:
   homeassistant:
     image: homeassistant/home-assistant
@@ -63,10 +65,8 @@ services:
 ```
 
 #### HA OS / Supervised
-Le socket Docker n'est pas directement accessible. Utilisez un proxy :
-
+Utilisez un proxy de socket :
 ```yaml
-# docker-compose.yml — à démarrer sur la machine hôte
 services:
   dockerproxy:
     image: tecnativa/docker-socket-proxy
@@ -86,14 +86,22 @@ services:
       NETWORKS: 1
       SERVICES: 1
 ```
+Puis configurez avec l'URL `http://<IP_HOTE>:2375`.
 
-Puis configurez l'intégration avec l'URL `http://<IP_HOTE>:2375`.
+### Configuration dans HA
+1. **Paramètres** → **Appareils & Services** → **Ajouter une intégration** → "Docker Manager"
+2. Choisissez **Local** (socket Unix) ou **Distant** (TCP)
+3. Sélectionnez les conteneurs à superviser (tous cochés par défaut)
+4. Validez
 
-### Setup dans HA
-1. **Paramètres** → **Appareils & Services** → **Ajouter une intégration**
-2. Cherchez "Docker Manager"
-3. Choisissez **Local** (socket) ou **Distant** (TCP)
-4. Testez et validez
+### Options (après installation)
+**Paramètres** → **Appareils & Services** → Docker Manager → **Configurer** :
+
+| Option | Défaut | Description |
+|--------|--------|-------------|
+| Conteneurs à superviser | tous | Ajouter/retirer des conteneurs à tout moment |
+| Intervalle de mise à jour | 30s | Fréquence de rafraîchissement des stats |
+| Intervalle de vérification automatique | 0 (désactivé) | 0=désactivé, 3600=toutes les heures, 86400=quotidien |
 
 ---
 
@@ -102,59 +110,78 @@ Puis configurez l'intégration avec l'URL `http://<IP_HOTE>:2375`.
 ### Appareil global "Docker"
 | Entité | Type | Description |
 |--------|------|-------------|
-| `sensor.docker_containers_total` | Sensor | Nombre total de conteneurs |
-| `sensor.docker_containers_running` | Sensor | Conteneurs en cours |
-| `sensor.docker_containers_stopped` | Sensor | Conteneurs arrêtés |
-| `sensor.docker_containers_paused` | Sensor | Conteneurs en pause |
-| `sensor.docker_images_total` | Sensor | Nombre d'images |
-| `sensor.docker_docker_version` | Sensor | Version du démon Docker |
+| `sensor.docker_containers_total` | Capteur | Total conteneurs |
+| `sensor.docker_containers_running` | Capteur | Conteneurs en cours |
+| `sensor.docker_containers_stopped` | Capteur | Conteneurs arrêtés |
+| `sensor.docker_containers_paused` | Capteur | Conteneurs en pause |
+| `sensor.docker_images_total` | Capteur | Total images |
+| `sensor.docker_docker_version` | Capteur (diagnostic) | Version du démon Docker |
 
-### Par conteneur (ex: `mon_conteneur`)
-| Entité | Type | Description |
-|--------|------|-------------|
-| `switch.mon_conteneur_running` | Switch | Démarrer / Arrêter |
-| `button.mon_conteneur_restart` | Button | Redémarrer |
-| `update.mon_conteneur_update` | Update | Mise à jour disponible / installer |
-| `sensor.mon_conteneur_state` | Sensor | État (`running`, `exited`…) |
-| `sensor.mon_conteneur_status` | Sensor | Statut lisible ("Up 3 days") |
-| `sensor.mon_conteneur_cpu` | Sensor | CPU % |
-| `sensor.mon_conteneur_memory` | Sensor | RAM en MB |
-| `sensor.mon_conteneur_memory_percent` | Sensor | RAM % |
-| `sensor.mon_conteneur_network_up` | Sensor | Débit montant (kB/s) |
-| `sensor.mon_conteneur_network_down` | Sensor | Débit descendant (kB/s) |
-| `sensor.mon_conteneur_network_total_up` | Sensor | Total monté (MB) |
-| `sensor.mon_conteneur_network_total_down` | Sensor | Total descendu (MB) |
-| `sensor.mon_conteneur_image` | Sensor | Image utilisée |
-| `sensor.mon_conteneur_health` | Sensor | Santé du conteneur |
-| `sensor.mon_conteneur_started_at` | Sensor | Date de démarrage |
+### Par conteneur (ex: `nginx`)
+| Entité | Catégorie | Description |
+|--------|-----------|-------------|
+| `switch.nginx_container` | Contrôle | Démarrer / Arrêter |
+| `button.nginx_restart` | Contrôle | Redémarrer |
+| `button.nginx_check_for_update` | Contrôle | Vérifier le registry (sans téléchargement) |
+| `update.nginx_update` | Mise à jour | Statut + installation |
+| `sensor.nginx_state` | Capteur | État (`running`, `exited`…) |
+| `sensor.nginx_image` | Capteur | Image utilisée |
+| `sensor.nginx_status` | Diagnostic | Statut lisible ("Up 3 days") |
+| `sensor.nginx_health` | Diagnostic | Résultat du healthcheck |
+| `sensor.nginx_started_at` | Diagnostic | Date de démarrage |
+| `sensor.nginx_cpu` | Diagnostic | CPU % |
+| `sensor.nginx_memory` | Diagnostic | RAM en MB |
+| `sensor.nginx_memory_2` | Diagnostic | RAM en % |
+| `sensor.nginx_network_up` | Diagnostic | Débit montant (kB/s) |
+| `sensor.nginx_network_down` | Diagnostic | Débit descendant (kB/s) |
+| `sensor.nginx_network_total_up` | Diagnostic | Total monté (MB) |
+| `sensor.nginx_network_total_down` | Diagnostic | Total descendu (MB) |
 
 ---
 
-## Service : Prune images
+## Service : Nettoyage des images
 
 ```yaml
+# Supprimer uniquement les images sans tag (défaut, plus sûr)
 service: docker_manager.prune_images
-```
 
-Supprime toutes les images Docker non utilisées par un conteneur actif.  
-Utile après des mises à jour pour récupérer de l'espace disque.
+# Supprimer toutes les images non utilisées
+service: docker_manager.prune_images
+data:
+  all_unused: true
+```
 
 ---
 
-## Automatisation exemple
+## Carte Lovelace
+
+Une carte dédiée est disponible : **[Docker Manager Card](https://github.com/jeanphic/ha-docker-manager-card)**
+
+```yaml
+type: custom:docker-manager-card
+entity: sensor.nginx_state
+name: Nginx           # optionnel
+language: fr          # optionnel : en, fr, de, es, nl (auto-détecté si absent)
+icon: mdi:nginx       # optionnel
+icon_color: "#009639" # optionnel
+```
+
+---
+
+## Exemple d'automation
 
 ```yaml
 # Notification quand une mise à jour est disponible
 automation:
-  alias: "Docker - Notification mise à jour"
+  alias: "Docker - Mise à jour disponible"
   trigger:
     - platform: state
-      entity_id: update.mon_conteneur_update
+      entity_id: update.nginx_update
       to: "on"
   action:
     - service: notify.mobile_app
       data:
-        title: "Docker - Mise à jour disponible"
+        title: "Mise à jour Docker disponible"
         message: "{{ trigger.to_state.attributes.title }} peut être mis à jour."
 ```
 
@@ -162,17 +189,28 @@ automation:
 
 ## FAQ
 
-**Q : Puis-je arrêter le conteneur Home Assistant ?**  
-R : Non, une protection empêche l'arrêt ou le redémarrage de `homeassistant`, `hass`, `home-assistant` et `ha` via cette intégration.
+**Q : Peut-on arrêter le conteneur Home Assistant ?**
+R : Non. Les conteneurs nommés `homeassistant`, `hass`, `home-assistant` ou `ha` sont protégés.
 
-**Q : La mise à jour préserve-t-elle les volumes ?**  
-R : Oui. La recréation du conteneur utilise exactement la même `HostConfig` (volumes, ports, variables d'environnement, réseau).
+**Q : La mise à jour préserve-t-elle les volumes ?**
+R : Oui. Le conteneur est recréé avec exactement la même `HostConfig` (volumes, ports, variables d'environnement, réseaux).
 
-**Q : Puis-je surveiller plusieurs hôtes Docker ?**  
-R : Pas encore en v1. Prévu pour la v2 via plusieurs entrées de configuration.
+**Q : La détection fonctionne-t-elle avec des registries privés ?**
+R : Oui, si votre démon Docker est déjà authentifié (`docker login`).
 
-**Q : La détection de mise à jour fonctionne-t-elle avec des registries privés ?**  
-R : Oui, si votre démon Docker est déjà authentifié auprès du registry.
+**Q : Que fait exactement la vérification automatique ?**
+R : Elle interroge l'API du registry (sans téléchargement) pour chaque conteneur supervisé et met à jour les entités `update.*`. Elle n'installe PAS automatiquement les mises à jour — cela reste manuel.
+
+**Q : Peut-on superviser plusieurs hôtes Docker ?**
+R : Pas encore en v2. Prévu pour une version future.
+
+---
+
+## Feuille de route
+
+- **v1** ✅ Supervision, start/stop/restart, détection de mises à jour, prune
+- **v2** ✅ Progression par étapes, vérification auto configurable, carte Lovelace
+- **v3** 🔜 Multi-hôtes Docker, logs des conteneurs
 
 ---
 
@@ -182,4 +220,4 @@ Inspiré par [Monitor Docker](https://github.com/ualex73/monitor_docker) de @ual
 
 ## Licence
 
-Apache License 2.0
+[Apache License 2.0](LICENSE)

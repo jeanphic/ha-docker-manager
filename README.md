@@ -14,48 +14,48 @@
 
 ### 📊 Monitoring
 - Container state and status (`running`, `exited`, `paused`…)
-- CPU (%), RAM (MB + %), network (speed up/down, total up/down)
-- Health check status (`healthy`, `unhealthy`), uptime, image name
-- Global Docker stats: total / running / stopped / paused containers, images count
+- CPU (%), RAM (MB + %), network speed (up/down kB/s), network totals (MB)
+- Health check status, uptime, image name
+- Global Docker stats: total / running / stopped / paused containers, image count, Docker version
 
 ### 🎛 Control
 - **Switch** to start/stop each container
 - **Button** to restart each container
-- **Safety lock**: the Home Assistant container itself cannot be stopped or restarted through this integration
+- **Safety lock**: the Home Assistant container cannot be stopped or restarted
 
 ### 🔄 Updates
-- Automatic update detection (digest comparison against registry)
-- Native HA **Update entity**: shows up in the HA Updates dashboard
-- One-click update: pulls the latest image and recreates the container preserving its full config (volumes, ports, env vars, networks)
-- Background check every hour
+- **Check for update** button per container — zero download, pure registry API query
+  - Uses Docker Hub API, GHCR, lscr.io, and any OCI-compliant registry with Bearer auth
+- **Update** entity: one-click pull + recreate preserving full config (volumes, ports, env, networks)
+- Step-by-step progress display during update
+- **Auto update check**: configurable background interval (disabled by default)
 
 ### 🧹 Maintenance
-- **Service** `docker_manager.prune_images`: removes all unused Docker images to reclaim disk space
+- **Service** `docker_manager.prune_images`: removes unused Docker images
+  - `all_unused: false` (default) — dangling/untagged images only
+  - `all_unused: true` — all images not used by any container
 
 ---
 
 ## Installation
 
 ### Via HACS (recommended)
-1. Open HACS in Home Assistant
-2. Integrations → **+** → search for "Docker Manager"
-3. Install and restart HA
+1. Open HACS → Integrations → **+** → search "Docker Manager"
+2. Install and restart HA
 
 ### Manual
-1. Copy the `custom_components/docker_manager` folder into `<config>/custom_components/`
+1. Copy `custom_components/docker_manager` to `<config>/custom_components/`
 2. Restart Home Assistant
 
 ---
 
 ## Configuration
 
-### Prerequisites depending on your setup
+### Prerequisites
 
-#### HA running in Docker (recommended)
-Mount the Docker socket into the HA container:
-
+#### HA running in Docker
+Mount the Docker socket:
 ```yaml
-# docker-compose.yml
 services:
   homeassistant:
     image: homeassistant/home-assistant
@@ -65,10 +65,8 @@ services:
 ```
 
 #### HA OS / Supervised
-The Docker socket is not directly accessible. Use a socket proxy instead:
-
+Use a socket proxy:
 ```yaml
-# docker-compose.yml — run this on the host machine
 services:
   dockerproxy:
     image: tecnativa/docker-socket-proxy
@@ -88,14 +86,22 @@ services:
       NETWORKS: 1
       SERVICES: 1
 ```
-
-Then configure the integration with the URL `http://<HOST_IP>:2375`.
+Then configure with URL `http://<HOST_IP>:2375`.
 
 ### Setup in HA
-1. Go to **Settings** → **Devices & Services** → **Add Integration**
-2. Search for "Docker Manager"
-3. Choose **Local** (Unix socket) or **Remote** (TCP)
-4. Test the connection and confirm
+1. **Settings** → **Devices & Services** → **Add Integration** → "Docker Manager"
+2. Choose **Local** (Unix socket) or **Remote** (TCP)
+3. Select which containers to monitor (all selected by default)
+4. Save
+
+### Options (after setup)
+Go to **Settings** → **Devices & Services** → Docker Manager → **Configure**:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| Containers to monitor | all | Add/remove containers anytime |
+| Update interval | 30s | How often stats are refreshed |
+| Auto update check interval | 0 (disabled) | Automatic background check: 0=off, 3600=hourly, 86400=daily |
 
 ---
 
@@ -104,59 +110,78 @@ Then configure the integration with the URL `http://<HOST_IP>:2375`.
 ### Global "Docker" device
 | Entity | Type | Description |
 |--------|------|-------------|
-| `sensor.docker_containers_total` | Sensor | Total number of containers |
+| `sensor.docker_containers_total` | Sensor | Total containers |
 | `sensor.docker_containers_running` | Sensor | Running containers |
 | `sensor.docker_containers_stopped` | Sensor | Stopped containers |
 | `sensor.docker_containers_paused` | Sensor | Paused containers |
 | `sensor.docker_images_total` | Sensor | Total images |
-| `sensor.docker_docker_version` | Sensor | Docker daemon version |
+| `sensor.docker_docker_version` | Sensor (diagnostic) | Docker daemon version |
 
-### Per container (e.g. `my_container`)
-| Entity | Type | Description |
-|--------|------|-------------|
-| `switch.my_container_running` | Switch | Start / Stop |
-| `button.my_container_restart` | Button | Restart |
-| `update.my_container_update` | Update | Update available / install |
-| `sensor.my_container_state` | Sensor | State (`running`, `exited`…) |
-| `sensor.my_container_status` | Sensor | Human-readable status ("Up 3 days") |
-| `sensor.my_container_cpu` | Sensor | CPU % |
-| `sensor.my_container_memory` | Sensor | RAM in MB |
-| `sensor.my_container_memory_percent` | Sensor | RAM % |
-| `sensor.my_container_network_up` | Sensor | Upload speed (kB/s) |
-| `sensor.my_container_network_down` | Sensor | Download speed (kB/s) |
-| `sensor.my_container_network_total_up` | Sensor | Total uploaded (MB) |
-| `sensor.my_container_network_total_down` | Sensor | Total downloaded (MB) |
-| `sensor.my_container_image` | Sensor | Image in use |
-| `sensor.my_container_health` | Sensor | Container health |
-| `sensor.my_container_started_at` | Sensor | Start timestamp |
+### Per container (e.g. `nginx`)
+| Entity | Category | Description |
+|--------|----------|-------------|
+| `switch.nginx_container` | Control | Start / Stop |
+| `button.nginx_restart` | Control | Restart |
+| `button.nginx_check_for_update` | Control | Check registry for update (no download) |
+| `update.nginx_update` | Update | Shows update status, triggers install |
+| `sensor.nginx_state` | Sensor | State (`running`, `exited`…) |
+| `sensor.nginx_image` | Sensor | Image in use |
+| `sensor.nginx_status` | Diagnostic | Human-readable status ("Up 3 days") |
+| `sensor.nginx_health` | Diagnostic | Health check result |
+| `sensor.nginx_started_at` | Diagnostic | Start timestamp |
+| `sensor.nginx_cpu` | Diagnostic | CPU % |
+| `sensor.nginx_memory` | Diagnostic | RAM in MB |
+| `sensor.nginx_memory_2` | Diagnostic | RAM in % |
+| `sensor.nginx_network_up` | Diagnostic | Upload speed (kB/s) |
+| `sensor.nginx_network_down` | Diagnostic | Download speed (kB/s) |
+| `sensor.nginx_network_total_up` | Diagnostic | Total uploaded (MB) |
+| `sensor.nginx_network_total_down` | Diagnostic | Total downloaded (MB) |
 
 ---
 
 ## Service: Prune images
 
 ```yaml
+# Remove only dangling (untagged) images — safe default
 service: docker_manager.prune_images
+
+# Remove ALL images not used by any container
+service: docker_manager.prune_images
+data:
+  all_unused: true
 ```
 
-Removes all Docker images not used by any active container.
-Useful after updates to reclaim disk space.
+---
+
+## Lovelace Card
+
+A dedicated card is available: **[Docker Manager Card](https://github.com/jeanphic/ha-docker-manager-card)**
+
+```yaml
+type: custom:docker-manager-card
+entity: sensor.nginx_state
+name: Nginx           # optional
+language: en          # optional: en, fr, de, es, nl (auto-detected if omitted)
+icon: mdi:nginx       # optional
+icon_color: "#009639" # optional
+```
 
 ---
 
 ## Automation example
 
 ```yaml
-# Notify when a container update is available
+# Notify when an update is available
 automation:
-  alias: "Docker - Update available notification"
+  alias: "Docker - Update available"
   trigger:
     - platform: state
-      entity_id: update.my_container_update
+      entity_id: update.nginx_update
       to: "on"
   action:
     - service: notify.mobile_app
       data:
-        title: "Docker - Update available"
+        title: "Docker update available"
         message: "{{ trigger.to_state.attributes.title }} can be updated."
 ```
 
@@ -165,26 +190,27 @@ automation:
 ## FAQ
 
 **Q: Can I stop the Home Assistant container?**
-A: No. The integration refuses to stop or restart containers named `homeassistant`, `hass`, `home-assistant` or `ha`.
+A: No. Containers named `homeassistant`, `hass`, `home-assistant` or `ha` are protected.
 
 **Q: Does the update preserve my volumes and settings?**
-A: Yes. Recreation uses the exact same `HostConfig` (volumes, ports, environment variables, networks) as the original container.
-
-**Q: Can I monitor multiple Docker hosts?**
-A: Not yet in v1. Planned for v2 via multiple config entries.
+A: Yes. The container is recreated with the exact same `HostConfig` (volumes, ports, env vars, networks).
 
 **Q: Does update detection work with private registries?**
-A: Yes, as long as your Docker daemon is already authenticated with the registry (`docker login`).
+A: Yes, as long as your Docker daemon is already authenticated (`docker login`).
 
-**Q: Does it work with images that don't have a `:latest` tag?**
-A: Yes. If no tag is specified, `:latest` is assumed. Pinned tags (e.g. `:1.2.3`) are also compared against the registry.
+**Q: What does "auto update check" do exactly?**
+A: It calls the registry API (no download) for each monitored container at the configured interval and updates the `update.*` entities. It does NOT automatically install updates — that remains manual.
+
+**Q: Can I monitor multiple Docker hosts?**
+A: Not in v2. Planned for a future version.
 
 ---
 
 ## Roadmap
 
-- **v1** ✅ Monitoring + start/stop/restart + update detection + prune
-- **v2** 🔜 Multi-host Docker, recent logs access, dedicated Lovelace card, scheduled auto-update
+- **v1** ✅ Monitoring, start/stop/restart, update detection, prune
+- **v2** ✅ Step-by-step update progress, auto update check interval, Lovelace card
+- **v3** 🔜 Multi-host Docker, container logs
 
 ---
 
