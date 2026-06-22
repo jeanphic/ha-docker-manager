@@ -216,7 +216,7 @@ class DockerManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> DockerManagerOptionsFlow:
-        return DockerManagerOptionsFlow(config_entry)
+        return DockerManagerOptionsFlow()
 
 
 # ------------------------------------------------------------------ #
@@ -226,8 +226,7 @@ class DockerManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class DockerManagerOptionsFlow(config_entries.OptionsFlow):
     """Allow changing container selection and scan interval after setup."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    def __init__(self) -> None:
         self._available_containers: list[str] = []
 
     async def async_step_init(
