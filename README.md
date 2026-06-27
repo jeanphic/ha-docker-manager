@@ -13,7 +13,7 @@
 ## Features
 
 ### 📊 Monitoring
-- Container state and status (`running`, `exited`, `paused`…)
+- Container state and status (`running`, `exited`, `paused`, `restarting`, `dead`, `created`, `removing`)
 - CPU (%), RAM (MB + %), network speed (up/down kB/s), network totals (MB)
 - Health check status, uptime, image name
 - Global Docker stats: total / running / stopped / paused containers, image count, Docker version
@@ -25,9 +25,10 @@
 
 ### 🔄 Updates
 - **Check for update** button per container — zero download, pure registry API query
-  - Uses Docker Hub API, GHCR, lscr.io, and any OCI-compliant registry with Bearer auth
+  - Supports Docker Hub, GHCR, lscr.io and any OCI-compliant registry with Bearer auth
 - **Update** entity: one-click pull + recreate preserving full config (volumes, ports, env, networks)
 - Step-by-step progress display during update
+- `update_available` automatically reset after install — whether triggered from the card, the HA Updates panel, or an automation
 - **Auto update check**: configurable background interval (disabled by default)
 
 ### 🧹 Maintenance
@@ -100,8 +101,8 @@ Go to **Settings** → **Devices & Services** → Docker Manager → **Configure
 | Option | Default | Description |
 |--------|---------|-------------|
 | Containers to monitor | all | Add/remove containers anytime |
-| Update interval | 30s | How often stats are refreshed |
-| Auto update check interval | 0 (disabled) | Automatic background check: 0=off, 3600=hourly, 86400=daily |
+| Update interval | 30s | How often stats are refreshed (5–300s) |
+| Auto update check interval | 0 (disabled) | Background check: 0=off, 3600=hourly, 86400=daily |
 
 ---
 
@@ -127,7 +128,7 @@ Go to **Settings** → **Devices & Services** → Docker Manager → **Configure
 | `sensor.nginx_state` | Sensor | State (`running`, `exited`…) |
 | `sensor.nginx_image` | Sensor | Image in use |
 | `sensor.nginx_status` | Diagnostic | Human-readable status ("Up 3 days") |
-| `sensor.nginx_health` | Diagnostic | Health check result |
+| `sensor.nginx_health` | Diagnostic | Health check result (only if HEALTHCHECK configured) |
 | `sensor.nginx_started_at` | Diagnostic | Start timestamp |
 | `sensor.nginx_cpu` | Diagnostic | CPU % |
 | `sensor.nginx_memory` | Diagnostic | RAM in MB |
@@ -153,18 +154,39 @@ data:
 
 ---
 
-## Lovelace Card
+## Lovelace Cards
 
-A dedicated card is available: **[Docker Manager Card](https://github.com/jeanphic/ha-docker-manager-card)**
+Two dedicated cards are available in the **[Docker Manager Card](https://github.com/jeanphic/ha-docker-manager-card)** package:
+
+### Container card
+Displays a single container with compact view and expandable stats.
 
 ```yaml
 type: custom:docker-manager-card
 entity: sensor.nginx_state
-name: Nginx           # optional
-language: en          # optional: en, fr, de, es, nl (auto-detected if omitted)
-icon: mdi:nginx       # optional
-icon_color: "#009639" # optional
+name: Nginx                   # optional
+language: en                  # optional: en, fr, de, es, nl (auto-detected)
+icon: mdi:nginx               # optional
+icon_color: "#009639"         # optional
 ```
+
+Supports entity overrides if renamed in HA:
+```yaml
+entity_switch: switch.my_custom_name
+entity_memory_pct: sensor.nginx_memory_2
+# ... see card README for full list
+```
+
+### Overview card
+Displays global Docker stats and a prune button.
+
+```yaml
+type: custom:docker-overview-card
+name: Docker        # optional
+all_unused: false   # true = prune all unused images
+```
+
+Both cards support **card_mod** via CSS variables (`--dmc-bg`, `--dmc-text`, `--dmc-btn-stop-color`…).
 
 ---
 
@@ -183,6 +205,19 @@ automation:
       data:
         title: "Docker update available"
         message: "{{ trigger.to_state.attributes.title }} can be updated."
+
+# Auto check for updates every night at 3am
+automation:
+  alias: "Docker - Nightly update check"
+  trigger:
+    - platform: time
+      at: "03:00:00"
+  action:
+    - service: button.press
+      target:
+        entity_id:
+          - button.nginx_check_for_update
+          - button.zigbee2mqtt_check_for_update
 ```
 
 ---
@@ -199,7 +234,10 @@ A: Yes. The container is recreated with the exact same `HostConfig` (volumes, po
 A: Yes, as long as your Docker daemon is already authenticated (`docker login`).
 
 **Q: What does "auto update check" do exactly?**
-A: It calls the registry API (no download) for each monitored container at the configured interval and updates the `update.*` entities. It does NOT automatically install updates — that remains manual.
+A: It queries the registry API (no download) for each monitored container at the configured interval and updates the `update.*` entities. It does NOT automatically install updates — that remains manual.
+
+**Q: The health sensor shows "none" — is that normal?**
+A: Yes. Docker only reports a health status if the image defines a `HEALTHCHECK` directive. Most images don't, so `none` is the expected value. The Lovelace card automatically hides the health tile when it is `none`.
 
 **Q: Can I monitor multiple Docker hosts?**
 A: Not in v2. Planned for a future version.
@@ -209,7 +247,7 @@ A: Not in v2. Planned for a future version.
 ## Roadmap
 
 - **v1** ✅ Monitoring, start/stop/restart, update detection, prune
-- **v2** ✅ Step-by-step update progress, auto update check interval, Lovelace card
+- **v2** ✅ Step-by-step update progress, auto update check interval, Lovelace cards, update_available reset after install
 - **v3** 🔜 Multi-host Docker, container logs
 
 ---
