@@ -13,9 +13,9 @@
 ## Fonctionnalités
 
 ### 📊 Supervision
-- État et statut de chaque conteneur (`running`, `exited`, `paused`…)
+- État et statut de chaque conteneur (`running`, `exited`, `paused`, `restarting`, `dead`, `created`, `removing`)
 - CPU (%), RAM (MB + %), débit réseau (montant/descendant kB/s), totaux réseau (MB)
-- Santé, uptime, image utilisée
+- Santé (si HEALTHCHECK configuré dans l'image), uptime, image utilisée
 - Stats globales Docker : total / running / stopped / paused, nombre d'images, version Docker
 
 ### 🎛 Contrôle
@@ -26,8 +26,9 @@
 ### 🔄 Mises à jour
 - **Bouton "Check for update"** par conteneur — zéro téléchargement, simple requête API registry
   - Compatible Docker Hub, GHCR, lscr.io et tout registry OCI avec authentification Bearer
-- **Entité Update** native HA : mise à jour en un clic (pull + recréation avec config préservée)
+- **Entité Update** native HA : pull + recréation en un clic avec config préservée (volumes, ports, env, réseaux)
 - Progression par étapes pendant la mise à jour
+- `update_available` remis à `False` automatiquement après installation — que ce soit depuis la carte, le panneau Mises à jour de HA, ou une automation
 - **Vérification automatique** : intervalle configurable en arrière-plan (désactivé par défaut)
 
 ### 🧹 Maintenance
@@ -100,7 +101,7 @@ Puis configurez avec l'URL `http://<IP_HOTE>:2375`.
 | Option | Défaut | Description |
 |--------|--------|-------------|
 | Conteneurs à superviser | tous | Ajouter/retirer des conteneurs à tout moment |
-| Intervalle de mise à jour | 30s | Fréquence de rafraîchissement des stats |
+| Intervalle de mise à jour | 30s | Fréquence de rafraîchissement des stats (5–300s) |
 | Intervalle de vérification automatique | 0 (désactivé) | 0=désactivé, 3600=toutes les heures, 86400=quotidien |
 
 ---
@@ -127,7 +128,7 @@ Puis configurez avec l'URL `http://<IP_HOTE>:2375`.
 | `sensor.nginx_state` | Capteur | État (`running`, `exited`…) |
 | `sensor.nginx_image` | Capteur | Image utilisée |
 | `sensor.nginx_status` | Diagnostic | Statut lisible ("Up 3 days") |
-| `sensor.nginx_health` | Diagnostic | Résultat du healthcheck |
+| `sensor.nginx_health` | Diagnostic | Résultat du healthcheck (si configuré dans l'image) |
 | `sensor.nginx_started_at` | Diagnostic | Date de démarrage |
 | `sensor.nginx_cpu` | Diagnostic | CPU % |
 | `sensor.nginx_memory` | Diagnostic | RAM en MB |
@@ -153,22 +154,43 @@ data:
 
 ---
 
-## Carte Lovelace
+## Cartes Lovelace
 
-Une carte dédiée est disponible : **[Docker Manager Card](https://github.com/jeanphic/ha-docker-manager-card)**
+Deux cartes dédiées sont disponibles dans le package **[Docker Manager Card](https://github.com/jeanphic/ha-docker-manager-card)** :
+
+### Carte conteneur
+Affiche un conteneur avec vue compacte et détails dépliables.
 
 ```yaml
 type: custom:docker-manager-card
 entity: sensor.nginx_state
-name: Nginx           # optionnel
-language: fr          # optionnel : en, fr, de, es, nl (auto-détecté si absent)
-icon: mdi:nginx       # optionnel
-icon_color: "#009639" # optionnel
+name: Nginx                   # optionnel
+language: fr                  # optionnel : en, fr, de, es, nl (auto-détecté)
+icon: mdi:nginx               # optionnel
+icon_color: "#009639"         # optionnel
 ```
+
+Overrides d'entités si renommées dans HA :
+```yaml
+entity_switch: switch.mon_nom_custom
+entity_memory_pct: sensor.nginx_memory_2
+# ... voir README de la carte pour la liste complète
+```
+
+### Carte globale
+Affiche les stats globales Docker et un bouton de nettoyage.
+
+```yaml
+type: custom:docker-overview-card
+name: Docker        # optionnel
+all_unused: false   # true = nettoyer toutes les images inutilisées
+```
+
+Les deux cartes supportent **card_mod** via des variables CSS (`--dmc-bg`, `--dmc-text`, `--dmc-btn-stop-color`…).
 
 ---
 
-## Exemple d'automation
+## Exemples d'automations
 
 ```yaml
 # Notification quand une mise à jour est disponible
@@ -183,6 +205,19 @@ automation:
       data:
         title: "Mise à jour Docker disponible"
         message: "{{ trigger.to_state.attributes.title }} peut être mis à jour."
+
+# Vérification automatique chaque nuit à 3h
+automation:
+  alias: "Docker - Vérification nocturne"
+  trigger:
+    - platform: time
+      at: "03:00:00"
+  action:
+    - service: button.press
+      target:
+        entity_id:
+          - button.nginx_check_for_update
+          - button.zigbee2mqtt_check_for_update
 ```
 
 ---
@@ -199,7 +234,10 @@ R : Oui. Le conteneur est recréé avec exactement la même `HostConfig` (volume
 R : Oui, si votre démon Docker est déjà authentifié (`docker login`).
 
 **Q : Que fait exactement la vérification automatique ?**
-R : Elle interroge l'API du registry (sans téléchargement) pour chaque conteneur supervisé et met à jour les entités `update.*`. Elle n'installe PAS automatiquement les mises à jour — cela reste manuel.
+R : Elle interroge l'API du registry (sans téléchargement) pour chaque conteneur supervisé et met à jour les entités `update.*`. Elle n'installe PAS automatiquement les mises à jour.
+
+**Q : Le capteur santé affiche "none" — est-ce normal ?**
+R : Oui. Docker ne rapporte un état de santé que si l'image définit une directive `HEALTHCHECK`. La plupart des images ne l'ont pas. La carte Lovelace masque automatiquement cette tuile quand la valeur est `none`.
 
 **Q : Peut-on superviser plusieurs hôtes Docker ?**
 R : Pas encore en v2. Prévu pour une version future.
@@ -209,7 +247,7 @@ R : Pas encore en v2. Prévu pour une version future.
 ## Feuille de route
 
 - **v1** ✅ Supervision, start/stop/restart, détection de mises à jour, prune
-- **v2** ✅ Progression par étapes, vérification auto configurable, carte Lovelace
+- **v2** ✅ Progression par étapes, vérification auto configurable, cartes Lovelace, reset update_available après installation
 - **v3** 🔜 Multi-hôtes Docker, logs des conteneurs
 
 ---
