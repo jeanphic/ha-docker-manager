@@ -148,6 +148,14 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
                 self._container_name,
                 progress_callback=self._set_step,
             )
+
+            # Mark update as done — works whether triggered from the card,
+            # the HA Updates panel, or an automation
+            cdata = self.coordinator.get_container_data(self._container_name)
+            if cdata:
+                cdata.update_available = False
+                cdata.local_digest = cdata.latest_digest
+
             await self._set_step(100, "✅ Update complete")
 
         except Exception as err:
@@ -158,12 +166,13 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             return
 
         finally:
-            # Reset progress after a short delay so user sees "complete"
             import asyncio
             await asyncio.sleep(3)
             self._in_progress = False
             self._step_label = ""
             self.async_write_ha_state()
+            # Force refresh so all entities (including update.*) reflect new state
+            await self.coordinator.async_request_refresh()
 
     async def async_check_for_update(self) -> None:
         """Manually trigger an update check for this container."""
