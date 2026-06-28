@@ -513,20 +513,39 @@ class DockerCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
 
     async def _periodic_update_check(self) -> None:
-        """Background task: check all containers for updates at configured interval."""
-        _LOGGER.debug("Periodic update check task started (interval: %ds)", self.update_check_interval)
+        """Background task: check all containers for updates at configured interval.
+
+        Runs a first check shortly after startup (60s), then repeats at the
+        configured interval. This avoids waiting a full day before the first check.
+        """
+        _LOGGER.debug(
+            "Periodic update check task started (interval: %ds) — first check in 60s",
+            self.update_check_interval,
+        )
+        # First check after 60s (give HA time to fully start)
+        await asyncio.sleep(60)
+
         while True:
-            await asyncio.sleep(self.update_check_interval)
             if not self.data:
+                await asyncio.sleep(30)
                 continue
-            _LOGGER.info("Running scheduled update check for all containers...")
+
+            _LOGGER.info(
+                "Running scheduled update check for %d container(s)...",
+                len(self.data),
+            )
             for name in list(self.data.keys()):
                 try:
                     await self.async_check_update(name)
-                    # Small delay between containers to avoid hammering the registry
                     await asyncio.sleep(2)
                 except Exception as err:
                     _LOGGER.debug("Scheduled update check failed for %s: %s", name, err)
+
+            _LOGGER.debug(
+                "Scheduled update check complete — next check in %ds",
+                self.update_check_interval,
+            )
+            await asyncio.sleep(self.update_check_interval)
 
     async def async_check_update(self, container_name: str) -> None:
         """Check if a newer image is available — zero download, pure API calls.
