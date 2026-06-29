@@ -535,11 +535,22 @@ class DockerCoordinator(DataUpdateCoordinator):
                 len(self.data),
             )
             for name in list(self.data.keys()):
-                try:
-                    await self.async_check_update(name)
-                    await asyncio.sleep(2)
-                except Exception as err:
-                    _LOGGER.debug("Scheduled update check failed for %s: %s", name, err)
+                success = False
+                for attempt in range(1, 3):  # up to 2 attempts
+                    try:
+                        await self.async_check_update(name)
+                        success = True
+                        break
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Scheduled update check failed for %s (attempt %d/2): %s",
+                            name, attempt, err,
+                        )
+                        if attempt < 2:
+                            await asyncio.sleep(10)  # wait before retry
+                if not success:
+                    _LOGGER.warning("Skipping %s after 2 failed attempts", name)
+                await asyncio.sleep(2)
 
             _LOGGER.debug(
                 "Scheduled update check complete — next check in %ds",
@@ -587,15 +598,21 @@ class DockerCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(self.data)
                 return
 
-            # 2. Remote digest (no download)
+            # 2. Remote digest (no download) — retry once if first attempt fails
             remote_digest = await self._get_remote_digest(image_name)
 
             if not remote_digest:
+                _LOGGER.debug(
+                    "First attempt failed for %s — retrying in 5s", image_name
+                )
+                await asyncio.sleep(5)
+                remote_digest = await self._get_remote_digest(image_name)
+
+            if not remote_digest:
                 _LOGGER.warning(
-                    "Could not retrieve remote digest for %s — update check inconclusive",
+                    "Could not retrieve remote digest for %s after retry — skipping",
                     image_name
                 )
-                cdata.update_available = False
                 cdata.last_update_check = datetime.now(timezone.utc)
                 self.async_set_updated_data(self.data)
                 return
@@ -615,7 +632,10 @@ class DockerCoordinator(DataUpdateCoordinator):
             )
 
         except Exception as err:
-            _LOGGER.warning("Update check failed for %s: %s", container_name, err)
+            _LOGGER.warning(
+                "Update check failed for %s: %s — will retry at next interval",
+                container_name, err,
+            )
             cdata.last_update_check = datetime.now(timezone.utc)
 
         self.async_set_updated_data(self.data)
