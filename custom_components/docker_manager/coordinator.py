@@ -644,11 +644,19 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         cdata = self.get_container_data(container_name)
         if not cdata:
-            _LOGGER.warning("async_check_update: container %s not found", container_name)
+            _LOGGER.warning(
+                "[docker_manager] %s: not found in coordinator data — skipping check",
+                container_name,
+            )
             return
 
         image_name = cdata.image
         if not image_name:
+            _LOGGER.warning(
+                "[docker_manager] %s: no image name resolved (cdata.image is empty) — "
+                "skipping check. State=%s, raw_id=%s",
+                container_name, cdata.state, cdata.image_id,
+            )
             return
         if ":" not in image_name:
             image_name += ":latest"
