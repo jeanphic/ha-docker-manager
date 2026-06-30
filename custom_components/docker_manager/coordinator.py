@@ -583,9 +583,12 @@ class DockerCoordinator(DataUpdateCoordinator):
                         len(container_names), ", ".join(container_names),
                     )
 
+                    processed_count = 0
                     for name in container_names:
+                        processed_count += 1
                         _LOGGER.warning(
-                            "[docker_manager] Auto-check: → now checking %s", name
+                            "[docker_manager] Auto-check: → [%d/%d] now checking %s",
+                            processed_count, len(container_names), name,
                         )
                         success = False
                         for attempt in range(1, 3):  # up to 2 attempts
@@ -619,6 +622,11 @@ class DockerCoordinator(DataUpdateCoordinator):
                                 name,
                             )
                         await asyncio.sleep(2)
+
+                    _LOGGER.warning(
+                        "[docker_manager] Auto-check: FOR LOOP FINISHED — processed %d/%d containers",
+                        processed_count, len(container_names),
+                    )
 
                     _LOGGER.warning(
                         "[docker_manager] Auto-check: cycle complete — sleeping %ds until next run",
@@ -655,7 +663,15 @@ class DockerCoordinator(DataUpdateCoordinator):
         2. Get remote digest via distributions.inspect or direct registry API
         3. Compare — no pull, no layer download
         """
+        _LOGGER.warning(
+            "[docker_manager] async_check_update CALLED for %s", container_name
+        )
+
         if not self._client:
+            _LOGGER.warning(
+                "[docker_manager] %s: self._client is None — Docker not connected, aborting",
+                container_name,
+            )
             return
 
         cdata = self.get_container_data(container_name)
