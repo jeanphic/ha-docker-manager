@@ -584,12 +584,28 @@ class DockerCoordinator(DataUpdateCoordinator):
                     )
 
                     for name in container_names:
+                        _LOGGER.warning(
+                            "[docker_manager] Auto-check: → now checking %s", name
+                        )
                         success = False
                         for attempt in range(1, 3):  # up to 2 attempts
                             try:
-                                await self.async_check_update(name)
+                                # Hard timeout: prevents a single hung Docker socket
+                                # call (no network timeout applies to it) from
+                                # freezing the entire cycle for all remaining containers
+                                await asyncio.wait_for(
+                                    self.async_check_update(name), timeout=30
+                                )
                                 success = True
                                 break
+                            except asyncio.TimeoutError:
+                                _LOGGER.warning(
+                                    "[docker_manager] Auto-check TIMED OUT for %s "
+                                    "(attempt %d/2, >30s) — Docker socket call may be hung",
+                                    name, attempt,
+                                )
+                                if attempt < 2:
+                                    await asyncio.sleep(10)
                             except Exception as err:
                                 _LOGGER.warning(
                                     "[docker_manager] Auto-check FAILED for %s (attempt %d/2): %s: %s",
