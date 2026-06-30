@@ -181,7 +181,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                 self._periodic_update_check(),
                 f"docker_manager_update_check_{self.entry_id}",
             )
-            _LOGGER.info(
+            _LOGGER.warning(
                 "Auto update check enabled every %ds", self.update_check_interval
             )
 
@@ -340,20 +340,37 @@ class DockerCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("Got remote digest via distributions.inspect: %s", digest[:19])
                 return digest
         except Exception as e:
-            _LOGGER.debug("distributions.inspect failed (%s), trying registry API", e)
+            _LOGGER.warning(
+                "[docker_manager] distributions.inspect failed for %s: %s: %s — falling back to registry API",
+                image_name, type(e).__name__, e,
+            )
 
         # --- Method 2: Direct registry API (no auth for public images) ---
         registry, repo, tag = self._parse_image_ref(image_name)
+        _LOGGER.warning(
+            "[docker_manager] Trying registry API for %s → registry=%s repo=%s tag=%s",
+            image_name, registry, repo, tag,
+        )
 
         try:
             if registry == "docker.io":
-                return await self._get_dockerhub_digest(repo, tag)
+                digest = await self._get_dockerhub_digest(repo, tag)
             elif registry == "ghcr.io":
-                return await self._get_ghcr_digest(repo, tag)
+                digest = await self._get_ghcr_digest(repo, tag)
             else:
-                return await self._get_generic_registry_digest(registry, repo, tag)
+                digest = await self._get_generic_registry_digest(registry, repo, tag)
+
+            if not digest:
+                _LOGGER.warning(
+                    "[docker_manager] Registry API returned no digest for %s (registry=%s)",
+                    image_name, registry,
+                )
+            return digest
         except Exception as e:
-            _LOGGER.debug("Registry API failed for %s: %s", image_name, e)
+            _LOGGER.warning(
+                "[docker_manager] Registry API call failed for %s: %s: %s",
+                image_name, type(e).__name__, e,
+            )
             return None
 
     @staticmethod
@@ -362,11 +379,23 @@ class DockerCoordinator(DataUpdateCoordinator):
         # Step 1: get anonymous token
         auth_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
         async with aiohttp.ClientSession() as session:
-            async with session.get(auth_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return None
-                token_data = await resp.json()
-                token = token_data.get("token", "")
+            try:
+                async with session.get(auth_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        _LOGGER.warning(
+                            "[docker_manager] Docker Hub auth token request failed for %s: HTTP %s — %s",
+                            repo, resp.status, body[:200],
+                        )
+                        return None
+                    token_data = await resp.json()
+                    token = token_data.get("token", "")
+            except Exception as e:
+                _LOGGER.warning(
+                    "[docker_manager] Docker Hub auth token request errored for %s: %s: %s",
+                    repo, type(e).__name__, e,
+                )
+                return None
 
             # Step 2: fetch manifest digest (HEAD request — no layer download)
             manifest_url = f"https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
@@ -379,11 +408,21 @@ class DockerCoordinator(DataUpdateCoordinator):
                     "application/vnd.oci.image.index.v1+json"
                 ),
             }
-            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    digest = resp.headers.get("Docker-Content-Digest", "")
-                    _LOGGER.debug("Docker Hub digest for %s:%s → %s", repo, tag, digest[:19] if digest else "none")
-                    return digest or None
+            try:
+                async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        digest = resp.headers.get("Docker-Content-Digest", "")
+                        _LOGGER.debug("Docker Hub digest for %s:%s → %s", repo, tag, digest[:19] if digest else "none")
+                        return digest or None
+                    _LOGGER.warning(
+                        "[docker_manager] Docker Hub manifest HEAD failed for %s:%s — HTTP %s",
+                        repo, tag, resp.status,
+                    )
+            except Exception as e:
+                _LOGGER.warning(
+                    "[docker_manager] Docker Hub manifest HEAD errored for %s:%s: %s: %s",
+                    repo, tag, type(e).__name__, e,
+                )
         return None
 
     @staticmethod
@@ -517,46 +556,81 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         Runs a first check shortly after startup (60s), then repeats at the
         configured interval. This avoids waiting a full day before the first check.
+
+        Wrapped in a top-level try/except so that ANY unexpected error is logged
+        instead of silently killing the background task (asyncio swallows
+        exceptions in background tasks by default).
         """
-        _LOGGER.debug(
-            "Periodic update check task started (interval: %ds) — first check in 60s",
+        _LOGGER.warning(
+            "[docker_manager] Auto-check task STARTED — interval=%ds, first check in 60s",
             self.update_check_interval,
         )
-        # First check after 60s (give HA time to fully start)
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
 
-        while True:
-            if not self.data:
-                await asyncio.sleep(30)
-                continue
-
-            _LOGGER.info(
-                "Running scheduled update check for %d container(s)...",
-                len(self.data),
-            )
-            for name in list(self.data.keys()):
-                success = False
-                for attempt in range(1, 3):  # up to 2 attempts
-                    try:
-                        await self.async_check_update(name)
-                        success = True
-                        break
-                    except Exception as err:
+            while True:
+                try:
+                    if not self.data:
                         _LOGGER.warning(
-                            "Scheduled update check failed for %s (attempt %d/2): %s",
-                            name, attempt, err,
+                            "[docker_manager] Auto-check: no container data yet, retrying in 30s"
                         )
-                        if attempt < 2:
-                            await asyncio.sleep(10)  # wait before retry
-                if not success:
-                    _LOGGER.warning("Skipping %s after 2 failed attempts", name)
-                await asyncio.sleep(2)
+                        await asyncio.sleep(30)
+                        continue
 
-            _LOGGER.debug(
-                "Scheduled update check complete — next check in %ds",
-                self.update_check_interval,
+                    container_names = list(self.data.keys())
+                    _LOGGER.warning(
+                        "[docker_manager] Auto-check: starting check for %d container(s): %s",
+                        len(container_names), ", ".join(container_names),
+                    )
+
+                    for name in container_names:
+                        success = False
+                        for attempt in range(1, 3):  # up to 2 attempts
+                            try:
+                                await self.async_check_update(name)
+                                success = True
+                                break
+                            except Exception as err:
+                                _LOGGER.warning(
+                                    "[docker_manager] Auto-check FAILED for %s (attempt %d/2): %s: %s",
+                                    name, attempt, type(err).__name__, err,
+                                )
+                                if attempt < 2:
+                                    await asyncio.sleep(10)
+                        if not success:
+                            _LOGGER.warning(
+                                "[docker_manager] Auto-check: giving up on %s after 2 attempts",
+                                name,
+                            )
+                        await asyncio.sleep(2)
+
+                    _LOGGER.warning(
+                        "[docker_manager] Auto-check: cycle complete — sleeping %ds until next run",
+                        self.update_check_interval,
+                    )
+                    await asyncio.sleep(self.update_check_interval)
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    # Catch-all so one bad cycle never kills the task permanently
+                    _LOGGER.error(
+                        "[docker_manager] Auto-check: unexpected error in cycle: %s: %s — "
+                        "retrying in 60s",
+                        type(err).__name__, err,
+                    )
+                    await asyncio.sleep(60)
+
+        except asyncio.CancelledError:
+            _LOGGER.warning("[docker_manager] Auto-check task cancelled (integration unloading)")
+            raise
+        except Exception as err:
+            # This should never happen now, but if it does, it WILL be visible
+            _LOGGER.error(
+                "[docker_manager] Auto-check task CRASHED permanently: %s: %s",
+                type(err).__name__, err,
+                exc_info=True,
             )
-            await asyncio.sleep(self.update_check_interval)
 
     async def async_check_update(self, container_name: str) -> None:
         """Check if a newer image is available — zero download, pure API calls.
@@ -579,7 +653,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         if ":" not in image_name:
             image_name += ":latest"
 
-        _LOGGER.info("Checking update for %s (image: %s) — no download", container_name, image_name)
+        _LOGGER.warning("Checking update for %s (image: %s) — no download", container_name, image_name)
 
         try:
             # 1. Local digest
@@ -589,9 +663,11 @@ class DockerCoordinator(DataUpdateCoordinator):
             local_id = local_image.get("Id", "")
 
             if not local_digest:
-                _LOGGER.debug(
-                    "No RepoDigest for %s (locally built or never pulled from registry) — cannot check",
-                    image_name
+                _LOGGER.warning(
+                    "[docker_manager] %s: image %s has no RepoDigest "
+                    "(locally built, imported, or pulled before Docker tracked digests) — "
+                    "cannot compare versions, update check skipped",
+                    container_name, image_name,
                 )
                 cdata.update_available = False
                 cdata.last_update_check = datetime.now(timezone.utc)
@@ -623,7 +699,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             cdata.latest_digest = remote_digest[:19]
             cdata.last_update_check = datetime.now(timezone.utc)
 
-            _LOGGER.info(
+            _LOGGER.warning(
                 "Update check %s: local=%s remote=%s available=%s",
                 container_name,
                 local_digest[:19],
