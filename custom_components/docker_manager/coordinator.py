@@ -706,11 +706,25 @@ class DockerCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "[docker_manager] %s: image %s has no RepoDigest "
                     "(locally built, imported, or pulled before Docker tracked digests) — "
-                    "cannot compare versions, update check skipped",
+                    "fetching remote digest to establish baseline for future comparisons",
                     container_name, image_name,
                 )
-                cdata.update_available = False
+                # Even without a local digest, fetch the remote digest so we can
+                # establish a baseline. On next check, if local_digest is still empty
+                # but remote changed, we can detect it. Also: after a real pull/update,
+                # Docker will populate RepoDigests and subsequent checks will work normally.
+                remote_digest = await self._get_remote_digest(image_name)
+                cdata.update_available = False  # can't compare without local baseline
+                cdata.local_digest = local_id[:19] if local_id else ""
+                cdata.latest_digest = remote_digest[:19] if remote_digest else ""
                 cdata.last_update_check = datetime.now(timezone.utc)
+                _LOGGER.warning(
+                    "[docker_manager] %s: baseline established — local_id=%s remote=%s "
+                    "(use 'Check for Update' button for accurate comparison via manual pull)",
+                    container_name,
+                    local_id[:19] if local_id else "none",
+                    remote_digest[:19] if remote_digest else "none",
+                )
                 self.async_set_updated_data(self.data)
                 return
 
