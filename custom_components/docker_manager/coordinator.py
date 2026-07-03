@@ -696,69 +696,79 @@ class DockerCoordinator(DataUpdateCoordinator):
         _LOGGER.warning("Checking update for %s (image: %s) — no download", container_name, image_name)
 
         try:
-            # 1. Local digest
-            local_image = await self._client.images.inspect(image_name)
+            # 1. Get local image info via direct Docker API (more reliable than aiodocker wrapper)
+            try:
+                local_image = await asyncio.wait_for(
+                    self._client._query_json(f"images/{image_name}/json"),
+                    timeout=10
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.warning(
+                    "[docker_manager] %s: Docker images.inspect timed out after 10s — skipping",
+                    container_name,
+                )
+                cdata.last_update_check = datetime.now(timezone.utc)
+                self.async_set_updated_data(self.data)
+                return
+            except Exception as e:
+                _LOGGER.warning(
+                    "[docker_manager] %s: Docker images.inspect failed: %s — skipping",
+                    container_name, e,
+                )
+                cdata.last_update_check = datetime.now(timezone.utc)
+                self.async_set_updated_data(self.data)
+                return
+
             repo_digests = local_image.get("RepoDigests", [])
             local_digest = repo_digests[0].split("@")[-1] if repo_digests else ""
             local_id = local_image.get("Id", "")
 
-            if not local_digest:
-                _LOGGER.warning(
-                    "[docker_manager] %s: image %s has no RepoDigest "
-                    "(locally built, imported, or pulled before Docker tracked digests) — "
-                    "fetching remote digest to establish baseline for future comparisons",
-                    container_name, image_name,
-                )
-                # Even without a local digest, fetch the remote digest so we can
-                # establish a baseline. On next check, if local_digest is still empty
-                # but remote changed, we can detect it. Also: after a real pull/update,
-                # Docker will populate RepoDigests and subsequent checks will work normally.
-                remote_digest = await self._get_remote_digest(image_name)
-                cdata.update_available = False  # can't compare without local baseline
-                cdata.local_digest = local_id[:19] if local_id else ""
-                cdata.latest_digest = remote_digest[:19] if remote_digest else ""
-                cdata.last_update_check = datetime.now(timezone.utc)
-                _LOGGER.warning(
-                    "[docker_manager] %s: baseline established — local_id=%s remote=%s "
-                    "(use 'Check for Update' button for accurate comparison via manual pull)",
-                    container_name,
-                    local_id[:19] if local_id else "none",
-                    remote_digest[:19] if remote_digest else "none",
-                )
-                self.async_set_updated_data(self.data)
-                return
-
-            # 2. Remote digest (no download) — retry once if first attempt fails
+            # 2. Get remote digest (no download)
             remote_digest = await self._get_remote_digest(image_name)
 
             if not remote_digest:
-                _LOGGER.debug(
-                    "First attempt failed for %s — retrying in 5s", image_name
-                )
+                # Retry once after 5s
                 await asyncio.sleep(5)
                 remote_digest = await self._get_remote_digest(image_name)
 
             if not remote_digest:
                 _LOGGER.warning(
-                    "Could not retrieve remote digest for %s after retry — skipping",
-                    image_name
+                    "[docker_manager] %s: could not retrieve remote digest after retry — skipping",
+                    container_name,
                 )
                 cdata.last_update_check = datetime.now(timezone.utc)
                 self.async_set_updated_data(self.data)
                 return
 
             # 3. Compare
-            cdata.update_available = local_digest != remote_digest
-            cdata.local_digest = local_digest[:19]
+            # If RepoDigest exists: compare digest vs digest (most accurate)
+            # If no RepoDigest: compare local image ID vs remote digest
+            # (different formats but a change in remote digest = new image available)
+            if local_digest:
+                update_available = local_digest != remote_digest
+                local_ref = local_digest[:19]
+            else:
+                # No RepoDigest — image was imported or built locally.
+                # Store remote digest now. On next check after a pull/update,
+                # Docker will populate RepoDigests and normal comparison kicks in.
+                # For now: if we have a previously stored latest_digest and it changed
+                # vs the current remote, flag as available.
+                prev_remote = cdata.latest_digest or ""
+                update_available = bool(prev_remote and prev_remote != remote_digest[:19])
+                local_ref = local_id[:19] if local_id else "no-repod"
+                _LOGGER.warning(
+                    "[docker_manager] %s: no RepoDigest — prev_remote=%s current_remote=%s update=%s",
+                    container_name, prev_remote, remote_digest[:19], update_available,
+                )
+
+            cdata.update_available = update_available
+            cdata.local_digest = local_ref
             cdata.latest_digest = remote_digest[:19]
             cdata.last_update_check = datetime.now(timezone.utc)
 
             _LOGGER.warning(
                 "Update check %s: local=%s remote=%s available=%s",
-                container_name,
-                local_digest[:19],
-                remote_digest[:19],
-                cdata.update_available,
+                container_name, local_ref, remote_digest[:19], update_available,
             )
 
         except Exception as err:
