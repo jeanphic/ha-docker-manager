@@ -12,5 +12,5 @@
     "aiodocker==0.21.0",
     "aiohttp>=3.9.0"
   ],
-  "version": "2.8.0"
+  "version": "2.9.0"
 }

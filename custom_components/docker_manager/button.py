@@ -1,4 +1,4 @@
-"""Button platform for Docker Manager - restart and check-update per container."""
+"""Button platform for Docker Manager."""
 from __future__ import annotations
 
 import logging
@@ -15,6 +15,12 @@ from .entity import DockerContainerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+BUTTON_CLASSES = [
+    ("restart",      "DockerRestartButton"),
+    ("pause",        "DockerPauseButton"),
+    ("check_update", "DockerCheckUpdateButton"),
+]
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -26,6 +32,7 @@ async def async_setup_entry(
     entities: list[ButtonEntity] = []
     for name in coordinator.data or {}:
         entities.append(DockerRestartButton(coordinator, name))
+        entities.append(DockerPauseButton(coordinator, name))
         entities.append(DockerCheckUpdateButton(coordinator, name))
 
     async_add_entities(entities)
@@ -36,6 +43,7 @@ async def async_setup_entry(
         for name in coordinator.data or {}:
             for cls, suffix in [
                 (DockerRestartButton, "restart"),
+                (DockerPauseButton, "pause"),
                 (DockerCheckUpdateButton, "check_update"),
             ]:
                 uid = f"{coordinator.entry_id}_{name}_{suffix}"
@@ -60,21 +68,38 @@ class DockerRestartButton(DockerContainerEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         if self._container_name.lower() in HA_CONTAINER_NAMES:
-            _LOGGER.warning(
-                "Refusing to restart Home Assistant container '%s'",
-                self._container_name,
-            )
+            _LOGGER.warning("Refusing to restart Home Assistant container '%s'", self._container_name)
             return
         await self.coordinator.async_restart_container(self._container_name)
         await self.coordinator.async_request_refresh()
 
 
-class DockerCheckUpdateButton(DockerContainerEntity, ButtonEntity):
-    """Button to manually check if a newer image is available for a container.
+class DockerPauseButton(DockerContainerEntity, ButtonEntity):
+    """Button to pause or unpause a Docker container (toggle)."""
 
-    Performs a docker pull (downloads only new layers if any) then compares
-    the image ID before and after. Works reliably with :latest and pinned tags.
-    """
+    def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
+        super().__init__(coordinator, container_name)
+        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_pause"
+        self._attr_name = "Pause / Unpause"
+        self._attr_entity_category = EntityCategory.CONFIG
+        self._attr_icon = "mdi:pause-circle"
+
+    async def async_press(self) -> None:
+        if self._container_name.lower() in HA_CONTAINER_NAMES:
+            _LOGGER.warning("Refusing to pause/unpause Home Assistant container '%s'", self._container_name)
+            return
+        cdata = self.coordinator.get_container_data(self._container_name)
+        if not cdata:
+            return
+        if cdata.state == "paused":
+            await self.coordinator.async_unpause_container(self._container_name)
+        else:
+            await self.coordinator.async_pause_container(self._container_name)
+        await self.coordinator.async_request_refresh()
+
+
+class DockerCheckUpdateButton(DockerContainerEntity, ButtonEntity):
+    """Button to manually check for a newer image."""
 
     _attr_icon = ICON_UPDATE
 
@@ -85,5 +110,4 @@ class DockerCheckUpdateButton(DockerContainerEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:
-        """Trigger an update check for this container."""
         await self.coordinator.async_check_update(self._container_name)

@@ -1,13 +1,11 @@
-"""Update platform for Docker Manager - detect and apply image updates."""
+"""Update platform for Docker Manager."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
-from homeassistant.components.update import (
-    UpdateEntity,
-    UpdateEntityFeature,
-)
+from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -17,16 +15,6 @@ from .coordinator import DockerCoordinator
 from .entity import DockerContainerEntity
 
 _LOGGER = logging.getLogger(__name__)
-
-# Update steps: (progress_percent, label)
-UPDATE_STEPS = [
-    (10, "⏳ Pulling image..."),
-    (35, "⏳ Pulling image..."),
-    (55, "⏸️ Stopping container..."),
-    (70, "🗑️ Removing old container..."),
-    (85, "🔨 Creating new container..."),
-    (95, "▶️ Starting container..."),
-]
 
 
 async def async_setup_entry(
@@ -59,10 +47,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
     """Update entity for a Docker container image."""
 
     _attr_icon = ICON_UPDATE
-    _attr_supported_features = (
-        UpdateEntityFeature.INSTALL
-        | UpdateEntityFeature.PROGRESS
-    )
+    _attr_supported_features = UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
     _attr_auto_update = False
 
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
@@ -99,7 +84,6 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
 
     @property
     def release_summary(self) -> str | None:
-        # Show step label during update, last check otherwise
         if self._step_label:
             return self._step_label
         data = self.container_data
@@ -107,7 +91,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             return None
         if data.last_update_check:
             return f"Last checked: {data.last_update_check.strftime('%Y-%m-%d %H:%M')}"
-        return "Click 'Check for Update' to verify availability."
+        return "Click 'Check for Update' to verify."
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -120,13 +104,11 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             "remote_digest": data.latest_digest,
             "last_check": (
                 data.last_update_check.isoformat()
-                if data.last_update_check
-                else None
+                if data.last_update_check else None
             ),
         }
 
     async def _set_step(self, percent: int, label: str) -> None:
-        """Update progress percent and step label, then push state to HA."""
         self._in_progress = percent
         self._step_label = label
         self.async_write_ha_state()
@@ -134,12 +116,9 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
     async def async_install(
         self, version: str | None, backup: bool, **kwargs: Any
     ) -> None:
-        """Pull latest image and recreate the container with step-by-step progress."""
+        """Pull latest image and recreate the container."""
         if self._container_name.lower() in HA_CONTAINER_NAMES:
-            _LOGGER.warning(
-                "Refusing to update Home Assistant container '%s'",
-                self._container_name,
-            )
+            _LOGGER.warning("Refusing to update HA container '%s'", self._container_name)
             return
 
         try:
@@ -148,32 +127,25 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
                 self._container_name,
                 progress_callback=self._set_step,
             )
-
-            # Mark update as done — works whether triggered from the card,
-            # the HA Updates panel, or an automation
+            # Immediately mark update as done so HA counter decrements
             cdata = self.coordinator.get_container_data(self._container_name)
             if cdata:
                 cdata.update_available = False
                 cdata.local_digest = cdata.latest_digest
-
             await self._set_step(100, "✅ Update complete")
 
         except Exception as err:
             _LOGGER.error("Update failed for %s: %s", self._container_name, err)
-            self._step_label = f"❌ Update failed: {err}"
+            self._step_label = f"❌ Failed: {err}"
             self._in_progress = False
             self.async_write_ha_state()
             return
 
         finally:
-            import asyncio
-            await asyncio.sleep(3)
+            # Short pause so user sees "complete", then reset all state
+            await asyncio.sleep(2)
             self._in_progress = False
             self._step_label = ""
+            # Write state BEFORE refresh so HA sees update_available=False immediately
             self.async_write_ha_state()
-            # Force refresh so all entities (including update.*) reflect new state
             await self.coordinator.async_request_refresh()
-
-    async def async_check_for_update(self) -> None:
-        """Manually trigger an update check for this container."""
-        await self.coordinator.async_check_update(self._container_name)

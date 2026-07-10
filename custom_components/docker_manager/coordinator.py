@@ -679,6 +679,26 @@ class DockerCoordinator(DataUpdateCoordinator):
                 await self.async_set_desired_state(name, "running")
                 return
 
+    async def async_pause_container(self, name: str) -> None:
+        if self._is_ha_container(name):
+            return
+        containers = await self._client.containers.list(all=True)
+        for c in containers:
+            info = await c.show()
+            if info.get("Name", "").lstrip("/") == name:
+                await c.pause()
+                await self.async_set_desired_state(name, "paused")
+                return
+
+    async def async_unpause_container(self, name: str) -> None:
+        containers = await self._client.containers.list(all=True)
+        for c in containers:
+            info = await c.show()
+            if info.get("Name", "").lstrip("/") == name:
+                await c.unpause()
+                await self.async_set_desired_state(name, "running")
+                return
+
     async def async_update_container(self, name: str, progress_callback=None) -> None:
         """Pull latest image and recreate the container preserving its config."""
         if self._is_ha_container(name):
@@ -773,15 +793,19 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not self._client:
             return {}
         try:
-            filters = json.dumps({"dangling": ["false" if all_unused else "true"]})
+            import urllib.parse
+            if all_unused:
+                filters = urllib.parse.quote('{"dangling":["false"]}')
+            else:
+                filters = urllib.parse.quote('{"dangling":["true"]}')
             response = await self._client._query_json(
-                "images/prune", method="POST", params={"filters": filters}
+                f"images/prune?filters={filters}", method="POST"
             )
             space = response.get("SpaceReclaimed", 0)
             deleted = response.get("ImagesDeleted") or []
             _LOGGER.info(
-                "Prune complete: %d image(s) removed, %.1f MB reclaimed",
-                len(deleted), space / (1024 * 1024)
+                "Prune: %d image(s) removed, %.1f MB reclaimed",
+                len(deleted), space / (1024 * 1024),
             )
             await self.async_request_refresh()
             return response
