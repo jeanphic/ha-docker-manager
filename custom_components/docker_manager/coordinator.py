@@ -807,6 +807,11 @@ class DockerCoordinator(DataUpdateCoordinator):
                 "Prune: %d image(s) removed, %.1f MB reclaimed",
                 len(deleted), space / (1024 * 1024),
             )
+            # Wait for Docker to finalize deletions before refreshing
+            await asyncio.sleep(2)
+            await self.async_request_refresh()
+            # Second refresh to catch any stragglers
+            await asyncio.sleep(3)
             await self.async_request_refresh()
             return response
         except Exception as err:
