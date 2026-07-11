@@ -29,6 +29,18 @@ async def async_setup_entry(
 ) -> None:
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    # Clean up stale entities from previous naming (e.g. button.xxx_pause_unpause)
+    from homeassistant.helpers import entity_registry as er
+    registry = er.async_get(hass)
+    stale_suffixes = ["_pause_unpause"]
+    for entity_entry in list(registry.entities.values()):
+        if entity_entry.config_entry_id == entry.entry_id:
+            for suffix in stale_suffixes:
+                if entity_entry.entity_id.endswith(suffix):
+                    _LOGGER.info("Removing stale entity: %s", entity_entry.entity_id)
+                    registry.async_remove(entity_entry.entity_id)
+                    break
+
     entities: list[ButtonEntity] = []
     for name in coordinator.data or {}:
         entities.append(DockerRestartButton(coordinator, name))
