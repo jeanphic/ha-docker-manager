@@ -29,17 +29,26 @@ async def async_setup_entry(
 ) -> None:
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Clean up stale entities from previous naming (e.g. button.xxx_pause_unpause)
+    # Clean up stale entities from previous naming schemes
+    # Searches by entity_id suffix AND unique_id suffix to catch all cases
     from homeassistant.helpers import entity_registry as er
     registry = er.async_get(hass)
-    stale_suffixes = ["_pause_unpause"]
+    stale_entity_suffixes = ["_pause_unpause"]
+    stale_unique_suffixes = ["_pause_unpause", "_pause"]  # _pause was used before v2.9.3
     for entity_entry in list(registry.entities.values()):
-        if entity_entry.config_entry_id == entry.entry_id:
-            for suffix in stale_suffixes:
-                if entity_entry.entity_id.endswith(suffix):
-                    _LOGGER.info("Removing stale entity: %s", entity_entry.entity_id)
-                    registry.async_remove(entity_entry.entity_id)
-                    break
+        if entity_entry.config_entry_id != entry.entry_id:
+            continue
+        should_remove = any(
+            entity_entry.entity_id.endswith(s) for s in stale_entity_suffixes
+        ) or any(
+            (entity_entry.unique_id or "").endswith(s) for s in stale_unique_suffixes
+        )
+        if should_remove:
+            _LOGGER.info(
+                "Removing stale entity: %s (unique_id=%s)",
+                entity_entry.entity_id, entity_entry.unique_id,
+            )
+            registry.async_remove(entity_entry.entity_id)
 
     entities: list[ButtonEntity] = []
     for name in coordinator.data or {}:
@@ -91,7 +100,7 @@ class DockerPauseButton(DockerContainerEntity, ButtonEntity):
 
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
-        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_pause"
+        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_pause_v2"
         self._attr_name = "Pause"
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_icon = "mdi:pause-circle"
