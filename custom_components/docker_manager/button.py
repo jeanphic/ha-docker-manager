@@ -29,26 +29,46 @@ async def async_setup_entry(
 ) -> None:
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Clean up stale entities from previous naming schemes
-    # Searches by entity_id suffix AND unique_id suffix to catch all cases
+    # Clean up stale entities and fix wrong entity_ids from previous versions
     from homeassistant.helpers import entity_registry as er
     registry = er.async_get(hass)
-    stale_entity_suffixes = ["_pause_unpause"]
+
+    # Unique_id suffixes to remove (old naming schemes)
     stale_unique_suffixes = ["_pause_unpause", "_pause", "_pause_v2"]
+    # Entity_id suffixes that indicate a wrong name was used
+    wrong_entity_suffixes = ["_pause_unpause"]
+
     for entity_entry in list(registry.entities.values()):
         if entity_entry.config_entry_id != entry.entry_id:
             continue
-        should_remove = any(
-            entity_entry.entity_id.endswith(s) for s in stale_entity_suffixes
-        ) or any(
-            (entity_entry.unique_id or "").endswith(s) for s in stale_unique_suffixes
-        )
-        if should_remove:
-            _LOGGER.info(
-                "Removing stale entity: %s (unique_id=%s)",
-                entity_entry.entity_id, entity_entry.unique_id,
-            )
-            registry.async_remove(entity_entry.entity_id)
+        uid = entity_entry.unique_id or ""
+        eid = entity_entry.entity_id
+
+        # Remove truly stale unique_ids (old versions)
+        if any(uid.endswith(s) for s in stale_unique_suffixes):
+            _LOGGER.info("Removing stale entity: %s (unique_id=%s)", eid, uid)
+            registry.async_remove(eid)
+            continue
+
+        # Fix entity_id if it has a wrong suffix (e.g. _pause_unpause)
+        if any(eid.endswith(s) for s in wrong_entity_suffixes):
+            _LOGGER.info("Removing wrong entity_id: %s", eid)
+            registry.async_remove(eid)
+            continue
+
+        # Fix entity_id with wrong area prefix (e.g. button.zone_xxx_pause → button.xxx_pause)
+        # If unique_id ends with _pause_v3, ensure entity_id ends with _pause
+        if uid.endswith("_pause_v3"):
+            # Extract container name from unique_id: {entry_id}_{container}_pause_v3
+            prefix = f"{entry.entry_id}_"
+            if uid.startswith(prefix):
+                container = uid[len(prefix):].replace("_pause_v3", "")
+                expected_eid = f"button.{container}_pause"
+                if eid != expected_eid:
+                    _LOGGER.info(
+                        "Fixing entity_id: %s → %s", eid, expected_eid
+                    )
+                    registry.async_remove(eid)
 
     entities: list[ButtonEntity] = []
     for name in coordinator.data or {}:
