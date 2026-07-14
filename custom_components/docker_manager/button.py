@@ -34,7 +34,7 @@ async def async_setup_entry(
     from homeassistant.helpers import entity_registry as er
     registry = er.async_get(hass)
     stale_entity_suffixes = ["_pause_unpause"]
-    stale_unique_suffixes = ["_pause_unpause", "_pause"]  # _pause was used before v2.9.3
+    stale_unique_suffixes = ["_pause_unpause", "_pause", "_pause_v2"]
     for entity_entry in list(registry.entities.values()):
         if entity_entry.config_entry_id != entry.entry_id:
             continue
@@ -100,7 +100,7 @@ class DockerPauseButton(DockerContainerEntity, ButtonEntity):
 
     def __init__(self, coordinator: DockerCoordinator, container_name: str) -> None:
         super().__init__(coordinator, container_name)
-        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_pause_v2"
+        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_pause_v3"
         self._attr_name = "Pause"
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_icon = "mdi:pause-circle"
