@@ -296,6 +296,34 @@ class DockerCoordinator(DataUpdateCoordinator):
                     else:
                         _LOGGER.warning("Error fetching container data: %s", err)
 
+            # Clean up orphaned entities for containers no longer present
+            if self.data:
+                removed = set(self.data.keys()) - set(result.keys())
+                if removed:
+                    _LOGGER.info(
+                        "Containers no longer present, cleaning up entities: %s",
+                        ", ".join(removed),
+                    )
+                    from homeassistant.helpers import entity_registry as er
+                    registry = er.async_get(self.hass)
+                    for entity_entry in list(registry.entities.values()):
+                        if entity_entry.config_entry_id != self.entry_id:
+                            continue
+                        # Extract container name from unique_id: {entry_id}_{name}_{suffix}
+                        uid = entity_entry.unique_id or ""
+                        prefix = f"{self.entry_id}_"
+                        if uid.startswith(prefix):
+                            remainder = uid[len(prefix):]
+                            # remainder = "{name}_{suffix}" — extract name
+                            for cname in removed:
+                                if remainder.startswith(f"{cname}_"):
+                                    _LOGGER.debug(
+                                        "Removing orphaned entity: %s",
+                                        entity_entry.entity_id,
+                                    )
+                                    registry.async_remove(entity_entry.entity_id)
+                                    break
+
             return result
 
         except DockerError as err:
@@ -653,6 +681,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             if info.get("Name", "").lstrip("/") == name:
                 await c.start()
                 await self.async_set_desired_state(name, "running")
+                await self.async_request_refresh()
                 return
 
     async def async_stop_container(self, name: str) -> None:
@@ -665,6 +694,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             if info.get("Name", "").lstrip("/") == name:
                 await c.stop()
                 await self.async_set_desired_state(name, "stopped")
+                await self.async_request_refresh()
                 return
 
     async def async_restart_container(self, name: str) -> None:
@@ -677,6 +707,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             if info.get("Name", "").lstrip("/") == name:
                 await c.restart()
                 await self.async_set_desired_state(name, "running")
+                await self.async_request_refresh()
                 return
 
     async def async_pause_container(self, name: str) -> None:
@@ -688,6 +719,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             if info.get("Name", "").lstrip("/") == name:
                 await c.pause()
                 await self.async_set_desired_state(name, "paused")
+                await self.async_request_refresh()
                 return
 
     async def async_unpause_container(self, name: str) -> None:
@@ -697,6 +729,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             if info.get("Name", "").lstrip("/") == name:
                 await c.unpause()
                 await self.async_set_desired_state(name, "running")
+                await self.async_request_refresh()
                 return
 
     async def async_update_container(self, name: str, progress_callback=None) -> None:
@@ -732,10 +765,17 @@ class DockerCoordinator(DataUpdateCoordinator):
         await _cb(15, "⏳ Pulling image...")
         _LOGGER.info("[%s] Pulling %s", name, image_name)
         try:
-            async for line in self._client.images.pull(image_name, stream=True):
-                pass
-        except TypeError:
-            await self._client.images.pull(image_name)
+            # Timeout: 10min max for large images
+            async def _do_pull():
+                try:
+                    async for _ in self._client.images.pull(image_name, stream=True):
+                        pass
+                except TypeError:
+                    await self._client.images.pull(image_name)
+
+            await asyncio.wait_for(_do_pull(), timeout=600)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Pull timed out after 10min for {image_name}")
 
         await _cb(50, "⏳ Pull complete — preparing...")
 
@@ -817,6 +857,26 @@ class DockerCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.error("Prune failed: %s", err)
             return {}
+
+    # ------------------------------------------------------------------ #
+    # Container logs
+    # ------------------------------------------------------------------ #
+
+    async def async_get_container_logs(self, name: str, tail: int = 50) -> str:
+        if not self._client:
+            return ""
+        try:
+            containers = await self._client.containers.list(all=True)
+            for c in containers:
+                info = await c.show()
+                if info.get("Name", "").lstrip("/") == name:
+                    logs = await c.log(stdout=True, stderr=True, tail=tail)
+                    if isinstance(logs, list):
+                        return "".join(logs)
+                    return logs or ""
+        except Exception as err:
+            _LOGGER.debug("Failed to get logs for %s: %s", name, err)
+        return ""
 
     # ------------------------------------------------------------------ #
     # Helpers

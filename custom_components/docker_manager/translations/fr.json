@@ -47,7 +47,10 @@
         "data": {
           "containers_include": "Conteneurs à superviser",
           "scan_interval": "Intervalle de mise à jour (secondes)",
-          "update_check_interval": "Intervalle de vérification automatique (secondes)"
+          "update_check_interval": "Intervalle de vérification automatique (secondes)",
+          "notify_on_down": "Notifier quand un conteneur s'arrête",
+          "enable_logs": "Activer le capteur de logs des conteneurs",
+          "logs_tail": "Nombre de lignes de logs à conserver (10-500)"
         }
       }
     }

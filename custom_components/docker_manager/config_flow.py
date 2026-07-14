@@ -298,6 +298,27 @@ class DockerManagerOptionsFlow(OptionsFlowWithReload):
                     vol.Optional(
                         CONF_UPDATE_CHECK_INTERVAL, default=current_update_interval
                     ): vol.All(int, vol.Range(min=0, max=86400)),
+                    vol.Optional(
+                        "notify_on_down",
+                        default=self.config_entry.options.get(
+                            "notify_on_down",
+                            self.config_entry.data.get("notify_on_down", False),
+                        ),
+                    ): bool,
+                    vol.Optional(
+                        "enable_logs",
+                        default=self.config_entry.options.get(
+                            "enable_logs",
+                            self.config_entry.data.get("enable_logs", False),
+                        ),
+                    ): bool,
+                    vol.Optional(
+                        "logs_tail",
+                        default=int(self.config_entry.options.get(
+                            "logs_tail",
+                            self.config_entry.data.get("logs_tail", 50),
+                        )),
+                    ): vol.All(int, vol.Range(min=10, max=500)),
                 }
             ),
             description_placeholders={

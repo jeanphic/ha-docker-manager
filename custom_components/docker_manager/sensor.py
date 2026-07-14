@@ -231,6 +231,13 @@ async def async_setup_entry(
     """Set up sensors."""
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    enable_logs: bool = entry.options.get(
+        "enable_logs", entry.data.get("enable_logs", False)
+    )
+    logs_tail: int = int(entry.options.get(
+        "logs_tail", entry.data.get("logs_tail", 50)
+    ))
+
     entities: list = []
 
     for desc in GLOBAL_SENSORS:
@@ -239,6 +246,8 @@ async def async_setup_entry(
     for container_name in coordinator.data or {}:
         for desc in CONTAINER_SENSORS:
             entities.append(DockerContainerSensor(coordinator, container_name, desc))
+        if enable_logs:
+            entities.append(DockerContainerLogsSensor(coordinator, container_name, logs_tail))
 
     async_add_entities(entities)
 
@@ -251,6 +260,12 @@ async def async_setup_entry(
                 if uid not in existing:
                     new_entities.append(
                         DockerContainerSensor(coordinator, container_name, desc)
+                    )
+            if enable_logs:
+                uid_logs = f"{entry.entry_id}_{container_name}_logs"
+                if uid_logs not in existing:
+                    new_entities.append(
+                        DockerContainerLogsSensor(coordinator, container_name, logs_tail)
                     )
         if new_entities:
             async_add_entities(new_entities)
@@ -310,3 +325,30 @@ class DockerContainerSensor(DockerContainerEntity, SensorEntity):
                 ),
             }
         return {}
+
+
+class DockerContainerLogsSensor(DockerContainerEntity, SensorEntity):
+    """Sensor that exposes the last N lines of container logs as an attribute."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:text-box-outline"
+
+    def __init__(self, coordinator: DockerCoordinator, container_name: str, tail: int = 50) -> None:
+        super().__init__(coordinator, container_name)
+        self._tail = tail
+        self._attr_unique_id = f"{coordinator.entry_id}_{container_name}_logs"
+        self._attr_name = "Logs"
+        self._logs: str = ""
+
+    @property
+    def native_value(self) -> str:
+        return self._logs[:255] if self._logs else "No logs"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"logs": self._logs, "tail": self._tail}
+
+    async def async_update(self) -> None:
+        self._logs = await self.coordinator.async_get_container_logs(
+            self._container_name, self._tail
+        )

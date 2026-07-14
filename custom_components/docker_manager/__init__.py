@@ -68,6 +68,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Restore container states from before HA restart (stopped/paused containers)
     await coordinator.async_restore_container_states()
 
+    # Start container state watcher for down notifications (if enabled)
+    notify_on_down: bool = entry.options.get(
+        "notify_on_down",
+        entry.data.get("notify_on_down", False),
+    )
+    if notify_on_down:
+        from .notify import ContainerStateWatcher
+        watcher = ContainerStateWatcher(hass, coordinator)
+        watcher.start()
+        entry.async_on_unload(watcher.stop)
+        _LOGGER.info("Container down notifications enabled")
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
