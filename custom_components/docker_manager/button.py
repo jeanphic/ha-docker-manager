@@ -15,12 +15,6 @@ from .entity import DockerContainerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-BUTTON_CLASSES = [
-    ("restart",      "DockerRestartButton"),
-    ("pause",        "DockerPauseButton"),
-    ("check_update", "DockerCheckUpdateButton"),
-]
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -29,46 +23,16 @@ async def async_setup_entry(
 ) -> None:
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Clean up stale entities and fix wrong entity_ids from previous versions
+    # Remove only truly obsolete entities (pre-v2.9.3 naming)
     from homeassistant.helpers import entity_registry as er
     registry = er.async_get(hass)
-
-    # Unique_id suffixes to remove (old naming schemes)
-    stale_unique_suffixes = ["_pause_unpause", "_pause", "_pause_v2"]
-    # Entity_id suffixes that indicate a wrong name was used
-    wrong_entity_suffixes = ["_pause_unpause"]
-
     for entity_entry in list(registry.entities.values()):
         if entity_entry.config_entry_id != entry.entry_id:
             continue
         uid = entity_entry.unique_id or ""
-        eid = entity_entry.entity_id
-
-        # Remove truly stale unique_ids (old versions)
-        if any(uid.endswith(s) for s in stale_unique_suffixes):
-            _LOGGER.info("Removing stale entity: %s (unique_id=%s)", eid, uid)
-            registry.async_remove(eid)
-            continue
-
-        # Fix entity_id if it has a wrong suffix (e.g. _pause_unpause)
-        if any(eid.endswith(s) for s in wrong_entity_suffixes):
-            _LOGGER.info("Removing wrong entity_id: %s", eid)
-            registry.async_remove(eid)
-            continue
-
-        # Fix entity_id with wrong area prefix (e.g. button.zone_xxx_pause → button.xxx_pause)
-        # If unique_id ends with _pause_v3, ensure entity_id ends with _pause
-        if uid.endswith("_pause_v3"):
-            # Extract container name from unique_id: {entry_id}_{container}_pause_v3
-            prefix = f"{entry.entry_id}_"
-            if uid.startswith(prefix):
-                container = uid[len(prefix):].replace("_pause_v3", "")
-                expected_eid = f"button.{container}_pause"
-                if eid != expected_eid:
-                    _LOGGER.info(
-                        "Fixing entity_id: %s → %s", eid, expected_eid
-                    )
-                    registry.async_remove(eid)
+        if uid.endswith("_pause_unpause"):
+            _LOGGER.info("Removing obsolete entity: %s", entity_entry.entity_id)
+            registry.async_remove(entity_entry.entity_id)
 
     entities: list[ButtonEntity] = []
     for name in coordinator.data or {}:
@@ -79,19 +43,26 @@ async def async_setup_entry(
     async_add_entities(entities)
 
     def _handle_update() -> None:
-        new = []
+        # Use the ACTUAL unique_ids of each button class — not a reconstructed suffix
+        new: list[ButtonEntity] = []
         existing_ids = {e.unique_id for e in entities}
         for name in coordinator.data or {}:
-            for cls, suffix in [
-                (DockerRestartButton, "restart"),
-                (DockerPauseButton, "pause"),
-                (DockerCheckUpdateButton, "check_update"),
-            ]:
-                uid = f"{coordinator.entry_id}_{name}_{suffix}"
-                if uid not in existing_ids:
-                    new.append(cls(coordinator, name))
+            # unique_id for each button type must match what the class sets
+            uid_restart = f"{coordinator.entry_id}_{name}_restart"
+            uid_pause   = f"{coordinator.entry_id}_{name}_pause_v3"
+            uid_check   = f"{coordinator.entry_id}_{name}_check_update"
+
+            if uid_restart not in existing_ids:
+                new.append(DockerRestartButton(coordinator, name))
+            if uid_pause not in existing_ids:
+                new.append(DockerPauseButton(coordinator, name))
+            if uid_check not in existing_ids:
+                new.append(DockerCheckUpdateButton(coordinator, name))
+
         if new:
             async_add_entities(new)
+            for e in new:
+                entities.append(e)
 
     coordinator.async_add_listener(_handle_update)
 
@@ -109,7 +80,7 @@ class DockerRestartButton(DockerContainerEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         if self._container_name.lower() in HA_CONTAINER_NAMES:
-            _LOGGER.warning("Refusing to restart Home Assistant container '%s'", self._container_name)
+            _LOGGER.warning("Refusing to restart HA container '%s'", self._container_name)
             return
         await self.coordinator.async_restart_container(self._container_name)
         await self.coordinator.async_request_refresh()
@@ -127,7 +98,7 @@ class DockerPauseButton(DockerContainerEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         if self._container_name.lower() in HA_CONTAINER_NAMES:
-            _LOGGER.warning("Refusing to pause/unpause Home Assistant container '%s'", self._container_name)
+            _LOGGER.warning("Refusing to pause/unpause HA container '%s'", self._container_name)
             return
         cdata = self.coordinator.get_container_data(self._container_name)
         if not cdata:
