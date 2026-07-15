@@ -717,6 +717,12 @@ class DockerCoordinator(DataUpdateCoordinator):
         for c in containers:
             info = await c.show()
             if info.get("Name", "").lstrip("/") == name:
+                state = info.get("State", {}).get("Status", "")
+                if state != "running":
+                    _LOGGER.warning(
+                        "Cannot pause %s: container is '%s', not running", name, state
+                    )
+                    return
                 await c.pause()
                 await self.async_set_desired_state(name, "paused")
                 await self.async_request_refresh()
@@ -727,6 +733,12 @@ class DockerCoordinator(DataUpdateCoordinator):
         for c in containers:
             info = await c.show()
             if info.get("Name", "").lstrip("/") == name:
+                state = info.get("State", {}).get("Status", "")
+                if state != "paused":
+                    _LOGGER.warning(
+                        "Cannot unpause %s: container is '%s', not paused", name, state
+                    )
+                    return
                 await c.unpause()
                 await self.async_set_desired_state(name, "running")
                 await self.async_request_refresh()
