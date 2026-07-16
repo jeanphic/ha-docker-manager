@@ -796,7 +796,8 @@ class DockerCoordinator(DataUpdateCoordinator):
         await _cb(15, "⏳ Pulling image...")
         _LOGGER.info("[%s] Pulling %s", name, image_name)
         try:
-            # Detect current platform to avoid pulling all architectures
+            # Use Docker API directly via _query_json to support platform parameter
+            # and avoid aiodocker's broken stream handling with multi-arch images
             import platform as _platform
             machine = _platform.machine().lower()
             arch_map = {
@@ -808,27 +809,27 @@ class DockerCoordinator(DataUpdateCoordinator):
                 "armv6l":  "linux/arm/v6",
             }
             docker_platform = arch_map.get(machine, "linux/amd64")
-            _LOGGER.debug("[%s] Pulling for platform %s", name, docker_platform)
+            _LOGGER.info("[%s] Pulling %s for platform %s", name, image_name, docker_platform)
 
-            # Timeout: 10min max for large images
+            # Parse image ref for Docker API
+            tag = "latest"
+            img_ref = image_name
+            if ":" in image_name.split("/")[-1]:
+                img_ref, tag = image_name.rsplit(":", 1)
+
+            import urllib.parse
+            params = f"fromImage={urllib.parse.quote(img_ref)}&tag={urllib.parse.quote(tag)}&platform={urllib.parse.quote(docker_platform)}"
+
             async def _do_pull():
-                try:
-                    # Pass platform to avoid multi-arch mass download
-                    async for _ in self._client.images.pull(
-                        image_name, stream=True, platform=docker_platform
-                    ):
+                async with self._client._query(
+                    f"images/create?{params}", method="POST"
+                ) as resp:
+                    # Consume the stream to completion
+                    async for _ in resp.content:
                         pass
-                except TypeError:
-                    await self._client.images.pull(image_name, platform=docker_platform)
-                except Exception:
-                    # Fallback without platform if registry doesn't support it
-                    try:
-                        async for _ in self._client.images.pull(image_name, stream=True):
-                            pass
-                    except TypeError:
-                        await self._client.images.pull(image_name)
 
             await asyncio.wait_for(_do_pull(), timeout=600)
+            _LOGGER.info("[%s] Pull complete", name)
         except asyncio.TimeoutError:
             raise RuntimeError(f"Pull timed out after 10min for {image_name}")
 
