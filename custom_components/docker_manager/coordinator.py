@@ -240,7 +240,7 @@ class DockerCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
 
     async def _async_update_data(self) -> dict[str, ContainerData]:
-        """Fetch all container data from Docker."""
+        """Fetch all container data from Docker. Auto-reconnects if socket closed."""
         if not self._client:
             raise UpdateFailed("Not connected to Docker")
 
@@ -328,6 +328,25 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         except DockerError as err:
             raise UpdateFailed(f"Docker API error: {err}") from err
+        except (RuntimeError, Exception) as err:
+            err_str = str(err).lower()
+            if "session is closed" in err_str or "connector is closed" in err_str:
+                _LOGGER.warning(
+                    "Docker socket closed — reconnecting... (%s)", err
+                )
+                try:
+                    if self._client:
+                        await self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+                try:
+                    await self.async_connect()
+                    _LOGGER.info("Reconnected to Docker successfully")
+                except Exception as reconnect_err:
+                    raise UpdateFailed(f"Docker reconnect failed: {reconnect_err}") from reconnect_err
+                raise UpdateFailed("Reconnected to Docker — data will refresh shortly")
+            raise UpdateFailed(f"Unexpected error fetching Docker data: {err}") from err
 
     def _compute_net_speed(self, cdata: ContainerData, stats: dict) -> None:
         try:
@@ -777,13 +796,37 @@ class DockerCoordinator(DataUpdateCoordinator):
         await _cb(15, "⏳ Pulling image...")
         _LOGGER.info("[%s] Pulling %s", name, image_name)
         try:
+            # Detect current platform to avoid pulling all architectures
+            import platform as _platform
+            machine = _platform.machine().lower()
+            arch_map = {
+                "x86_64": "linux/amd64",
+                "amd64":  "linux/amd64",
+                "aarch64": "linux/arm64",
+                "arm64":   "linux/arm64",
+                "armv7l":  "linux/arm/v7",
+                "armv6l":  "linux/arm/v6",
+            }
+            docker_platform = arch_map.get(machine, "linux/amd64")
+            _LOGGER.debug("[%s] Pulling for platform %s", name, docker_platform)
+
             # Timeout: 10min max for large images
             async def _do_pull():
                 try:
-                    async for _ in self._client.images.pull(image_name, stream=True):
+                    # Pass platform to avoid multi-arch mass download
+                    async for _ in self._client.images.pull(
+                        image_name, stream=True, platform=docker_platform
+                    ):
                         pass
                 except TypeError:
-                    await self._client.images.pull(image_name)
+                    await self._client.images.pull(image_name, platform=docker_platform)
+                except Exception:
+                    # Fallback without platform if registry doesn't support it
+                    try:
+                        async for _ in self._client.images.pull(image_name, stream=True):
+                            pass
+                    except TypeError:
+                        await self._client.images.pull(image_name)
 
             await asyncio.wait_for(_do_pull(), timeout=600)
         except asyncio.TimeoutError:
@@ -841,7 +884,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         await self.async_request_refresh()
 
     async def async_prune_images(self, all_unused: bool = False) -> dict:
-        """Remove unused Docker images."""
+        """Remove unused Docker images — multiple passes to handle large sets."""
         if not self._client:
             return {}
         try:
@@ -850,22 +893,39 @@ class DockerCoordinator(DataUpdateCoordinator):
                 filters = urllib.parse.quote('{"dangling":["false"]}')
             else:
                 filters = urllib.parse.quote('{"dangling":["true"]}')
-            response = await self._client._query_json(
-                f"images/prune?filters={filters}", method="POST"
-            )
-            space = response.get("SpaceReclaimed", 0)
-            deleted = response.get("ImagesDeleted") or []
+
+            total_deleted = 0
+            total_space = 0
+
+            # Run up to 5 passes — Docker may not remove all images in one call
+            # when there are dependency chains between images
+            for pass_num in range(1, 6):
+                response = await self._client._query_json(
+                    f"images/prune?filters={filters}", method="POST"
+                )
+                deleted = response.get("ImagesDeleted") or []
+                space = response.get("SpaceReclaimed", 0)
+                total_deleted += len(deleted)
+                total_space += space
+
+                if not deleted:
+                    break  # nothing left to prune
+
+                _LOGGER.info(
+                    "Prune pass %d: %d image(s) removed, %.1f MB reclaimed",
+                    pass_num, len(deleted), space / (1024 * 1024),
+                )
+                await asyncio.sleep(1)
+
             _LOGGER.info(
-                "Prune: %d image(s) removed, %.1f MB reclaimed",
-                len(deleted), space / (1024 * 1024),
+                "Prune complete: %d total image(s) removed, %.1f MB reclaimed",
+                total_deleted, total_space / (1024 * 1024),
             )
-            # Wait for Docker to finalize deletions before refreshing
             await asyncio.sleep(2)
             await self.async_request_refresh()
-            # Second refresh to catch any stragglers
             await asyncio.sleep(3)
             await self.async_request_refresh()
-            return response
+            return {"ImagesDeleted": total_deleted, "SpaceReclaimed": total_space}
         except Exception as err:
             _LOGGER.error("Prune failed: %s", err)
             return {}

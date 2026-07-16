@@ -56,6 +56,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
         self._attr_name = "Update"
         self._in_progress: bool | int = False
         self._step_label: str = ""
+        self._install_lock = False  # prevent parallel installs""
 
     @property
     def title(self) -> str:
@@ -121,6 +122,14 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             _LOGGER.warning("Refusing to update HA container '%s'", self._container_name)
             return
 
+        if self._install_lock:
+            _LOGGER.warning(
+                "Update already in progress for %s — ignoring duplicate call",
+                self._container_name,
+            )
+            return
+
+        self._install_lock = True
         try:
             await self._set_step(10, "⏳ Pulling image...")
             await self.coordinator.async_update_container(
@@ -146,6 +155,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             await asyncio.sleep(2)
             self._in_progress = False
             self._step_label = ""
+            self._install_lock = False
             # Write state BEFORE refresh so HA sees update_available=False immediately
             self.async_write_ha_state()
             await self.coordinator.async_request_refresh()
