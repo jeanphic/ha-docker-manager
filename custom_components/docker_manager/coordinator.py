@@ -771,6 +771,11 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not self._client:
             return
 
+        async def _cb(percent: int, label: str) -> None:
+            if progress_callback:
+                await progress_callback(percent, label)
+
+        # ── 1. Find container ───────────────────────────────────────────
         containers = await self._client.containers.list(all=True)
         target = None
         for c in containers:
@@ -789,44 +794,18 @@ class DockerCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Cannot determine image for container %s", name)
             return
 
-        async def _cb(percent: int, label: str) -> None:
-            if progress_callback:
-                await progress_callback(percent, label)
+        was_running = info.get("State", {}).get("Status") == "running"
 
+        # ── 2. Pull new image ────────────────────────────────────────────
         await _cb(15, "⏳ Pulling image...")
         _LOGGER.info("[%s] Pulling %s", name, image_name)
         try:
-            # Use Docker API directly via _query_json to support platform parameter
-            # and avoid aiodocker's broken stream handling with multi-arch images
-            import platform as _platform
-            machine = _platform.machine().lower()
-            arch_map = {
-                "x86_64": "linux/amd64",
-                "amd64":  "linux/amd64",
-                "aarch64": "linux/arm64",
-                "arm64":   "linux/arm64",
-                "armv7l":  "linux/arm/v7",
-                "armv6l":  "linux/arm/v6",
-            }
-            docker_platform = arch_map.get(machine, "linux/amd64")
-            _LOGGER.info("[%s] Pulling %s for platform %s", name, image_name, docker_platform)
-
-            # Parse image ref for Docker API
-            tag = "latest"
-            img_ref = image_name
-            if ":" in image_name.split("/")[-1]:
-                img_ref, tag = image_name.rsplit(":", 1)
-
-            import urllib.parse
-            params = f"fromImage={urllib.parse.quote(img_ref)}&tag={urllib.parse.quote(tag)}&platform={urllib.parse.quote(docker_platform)}"
-
             async def _do_pull():
-                async with self._client._query(
-                    f"images/create?{params}", method="POST"
-                ) as resp:
-                    # Consume the stream to completion
-                    async for _ in resp.content:
+                try:
+                    async for _ in self._client.images.pull(image_name, stream=True):
                         pass
+                except TypeError:
+                    await self._client.images.pull(image_name)
 
             await asyncio.wait_for(_do_pull(), timeout=600)
             _LOGGER.info("[%s] Pull complete", name)
@@ -835,52 +814,74 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         await _cb(50, "⏳ Pull complete — preparing...")
 
-        config = info.get("Config", {})
+        # ── 3. Save full container config for recreation ─────────────────
+        config      = info.get("Config", {})
         host_config = info.get("HostConfig", {})
-        networks = info.get("NetworkSettings", {}).get("Networks", {})
-        was_running = info.get("State", {}).get("Status") == "running"
+        networks    = info.get("NetworkSettings", {}).get("Networks", {})
 
-        networking_config = {
-            net_name: {
+        networking_config = {}
+        for net_name, net_data in networks.items():
+            networking_config[net_name] = {
                 "IPAMConfig": net_data.get("IPAMConfig"),
-                "Aliases": net_data.get("Aliases", []),
+                "Aliases": [a for a in (net_data.get("Aliases") or []) if a != name],
             }
-            for net_name, net_data in networks.items()
-        }
 
-        if was_running:
-            await _cb(60, "⏸️ Stopping container...")
-            await container.stop()
-
-        await _cb(70, "🗑️ Removing old container...")
-        await container.delete()
-
-        await _cb(80, "🔨 Creating new container...")
         create_config = {
-            "Image": image_name,
-            "Env": config.get("Env") or [],
-            "Labels": config.get("Labels") or {},
+            "Image":        image_name,
+            "Env":          config.get("Env") or [],
+            "Labels":       config.get("Labels") or {},
             "ExposedPorts": config.get("ExposedPorts") or {},
-            "Volumes": config.get("Volumes") or {},
-            "Entrypoint": config.get("Entrypoint"),
-            "Cmd": config.get("Cmd"),
-            "WorkingDir": config.get("WorkingDir", ""),
-            "User": config.get("User", ""),
-            "HostConfig": host_config,
+            "Volumes":      config.get("Volumes") or {},
+            "Entrypoint":   config.get("Entrypoint"),
+            "Cmd":          config.get("Cmd"),
+            "WorkingDir":   config.get("WorkingDir", ""),
+            "User":         config.get("User", ""),
+            "Hostname":     config.get("Hostname", ""),
+            "Domainname":   config.get("Domainname", ""),
+            "HostConfig":   host_config,
             "NetworkingConfig": {"EndpointsConfig": networking_config},
         }
-        new_container = await self._client.containers.create(config=create_config, name=name)
+
+        # ── 4. Stop + remove old container ──────────────────────────────
+        if was_running:
+            await _cb(60, "⏸️ Stopping container...")
+            try:
+                await container.stop(timeout=10)
+            except Exception as e:
+                _LOGGER.warning("[%s] Stop error (forcing): %s", name, e)
+
+        await _cb(70, "🗑️ Removing old container...")
+        try:
+            await container.delete(force=True)
+        except Exception as e:
+            _LOGGER.error("[%s] Failed to remove container: %s", name, e)
+            raise
+
+        # ── 5. Create + start new container ─────────────────────────────
+        await _cb(80, "🔨 Creating new container...")
+        try:
+            new_container = await self._client.containers.create(
+                config=create_config, name=name
+            )
+        except Exception as e:
+            _LOGGER.error("[%s] Failed to create container: %s", name, e)
+            raise
 
         if was_running:
             await _cb(90, "▶️ Starting container...")
-            await new_container.start()
-            await self.async_set_desired_state(name, "running")
+            try:
+                await new_container.start()
+                await self.async_set_desired_state(name, "running")
+            except Exception as e:
+                _LOGGER.error("[%s] Failed to start container: %s", name, e)
+                raise
 
         _LOGGER.info("[%s] Update complete", name)
 
         cdata = self.get_container_data(name)
         if cdata:
             cdata.update_available = False
+            cdata.local_digest = cdata.latest_digest
 
         await self.async_request_refresh()
 
