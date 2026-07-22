@@ -296,31 +296,34 @@ class DockerCoordinator(DataUpdateCoordinator):
                     else:
                         _LOGGER.warning("Error fetching container data: %s", err)
 
-            # Clean up orphaned entities for containers no longer present
+            # Clean up orphaned entities — only after 3 consecutive missing polls
+            # (~90s with 30s scan_interval) to avoid removing during update/restart
             if self.data:
                 removed = set(self.data.keys()) - set(result.keys())
-                if removed:
+                if not hasattr(self, "_missing_counts"):
+                    self._missing_counts: dict[str, int] = {}
+                for cname in removed:
+                    self._missing_counts[cname] = self._missing_counts.get(cname, 0) + 1
+                for cname in list(self._missing_counts.keys()):
+                    if cname not in removed:
+                        del self._missing_counts[cname]
+                confirmed_removed = {n for n, c in self._missing_counts.items() if c >= 3}
+                if confirmed_removed:
                     _LOGGER.info(
-                        "Containers no longer present, cleaning up entities: %s",
-                        ", ".join(removed),
+                        "Cleaning up entities for containers missing 3+ polls: %s",
+                        ", ".join(confirmed_removed),
                     )
                     from homeassistant.helpers import entity_registry as er
                     registry = er.async_get(self.hass)
                     for entity_entry in list(registry.entities.values()):
                         if entity_entry.config_entry_id != self.entry_id:
                             continue
-                        # Extract container name from unique_id: {entry_id}_{name}_{suffix}
                         uid = entity_entry.unique_id or ""
                         prefix = f"{self.entry_id}_"
                         if uid.startswith(prefix):
                             remainder = uid[len(prefix):]
-                            # remainder = "{name}_{suffix}" — extract name
-                            for cname in removed:
+                            for cname in confirmed_removed:
                                 if remainder.startswith(f"{cname}_"):
-                                    _LOGGER.debug(
-                                        "Removing orphaned entity: %s",
-                                        entity_entry.entity_id,
-                                    )
                                     registry.async_remove(entity_entry.entity_id)
                                     break
 
@@ -905,17 +908,23 @@ class DockerCoordinator(DataUpdateCoordinator):
                 response = await self._client._query_json(
                     f"images/prune?filters={filters}", method="POST"
                 )
-                deleted = response.get("ImagesDeleted") or []
+                deleted_raw = response.get("ImagesDeleted")
+                if isinstance(deleted_raw, list):
+                    deleted_count = len(deleted_raw)
+                elif isinstance(deleted_raw, int):
+                    deleted_count = deleted_raw
+                else:
+                    deleted_count = 0
                 space = response.get("SpaceReclaimed", 0)
-                total_deleted += len(deleted)
+                total_deleted += deleted_count
                 total_space += space
 
-                if not deleted:
-                    break  # nothing left to prune
+                if not deleted_count:
+                    break
 
                 _LOGGER.info(
                     "Prune pass %d: %d image(s) removed, %.1f MB reclaimed",
-                    pass_num, len(deleted), space / (1024 * 1024),
+                    pass_num, deleted_count, space / (1024 * 1024),
                 )
                 await asyncio.sleep(1)
 

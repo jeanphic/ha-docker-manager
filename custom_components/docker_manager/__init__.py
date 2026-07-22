@@ -92,7 +92,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         result = await coord.async_prune_images(all_unused=all_unused)
         _LOGGER.info(
             "Docker prune completed: %s images deleted, %s bytes reclaimed",
-            len(result.get("ImagesDeleted") or []),
+            result.get("ImagesDeleted") if isinstance(result.get("ImagesDeleted"), int) else len(result.get("ImagesDeleted") or []),
             result.get("SpaceReclaimed", 0),
         )
 
