@@ -504,29 +504,104 @@ class DockerCoordinator(DataUpdateCoordinator):
             return None
 
     @staticmethod
+    @staticmethod
     async def _get_dockerhub_digest(repo: str, tag: str) -> str | None:
-        auth_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
+        """Get the architecture-specific digest from Docker Hub.
+
+        For multi-arch images, the HEAD request returns the manifest list digest
+        which is DIFFERENT from the local image digest. We must resolve the
+        architecture-specific digest to compare correctly.
+        """
+        import platform as _platform
+        machine = _platform.machine().lower()
+        arch_map = {
+            "x86_64": "amd64", "amd64": "amd64",
+            "aarch64": "arm64", "arm64": "arm64",
+            "armv7l": "arm", "armv6l": "arm",
+        }
+        target_arch = arch_map.get(machine, "amd64")
+
+        auth_url = (
+            f"https://auth.docker.io/token"
+            f"?service=registry.docker.io&scope=repository:{repo}:pull"
+        )
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(auth_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         return None
                     token = (await resp.json()).get("token", "")
-            except Exception:
+            except Exception as e:
+                _LOGGER.debug("Docker Hub auth failed for %s: %s", repo, e)
                 return None
 
             manifest_url = f"https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
-            headers = {
+
+            # Step 1: Try to get manifest list (multi-arch index)
+            list_headers = {
                 "Authorization": f"Bearer {token}",
                 "Accept": (
-                    "application/vnd.docker.distribution.manifest.v2+json,"
-                    "application/vnd.oci.image.manifest.v1+json,"
                     "application/vnd.docker.distribution.manifest.list.v2+json,"
                     "application/vnd.oci.image.index.v1+json"
                 ),
             }
             try:
-                async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    manifest_url, headers=list_headers,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        ct = resp.headers.get("Content-Type", "")
+                        data = await resp.json(content_type=None)
+                        manifests = data.get("manifests", [])
+
+                        if manifests:
+                            # Multi-arch: find our architecture
+                            for m in manifests:
+                                plat = m.get("platform", {})
+                                if (plat.get("architecture") == target_arch
+                                        and plat.get("os", "linux") == "linux"
+                                        and not plat.get("variant")):
+                                    arch_digest = m.get("digest", "")
+                                    _LOGGER.debug(
+                                        "Docker Hub [%s] %s:%s → %s",
+                                        target_arch, repo, tag, arch_digest[:19]
+                                    )
+                                    return arch_digest or None
+                            # Try with variant (e.g. arm/v7)
+                            for m in manifests:
+                                plat = m.get("platform", {})
+                                if (plat.get("architecture") == target_arch
+                                        and plat.get("os", "linux") == "linux"):
+                                    arch_digest = m.get("digest", "")
+                                    _LOGGER.debug(
+                                        "Docker Hub [%s variant] %s:%s → %s",
+                                        target_arch, repo, tag, arch_digest[:19]
+                                    )
+                                    return arch_digest or None
+                            # Fallback: first entry
+                            fallback = manifests[0].get("digest", "")
+                            _LOGGER.debug(
+                                "Docker Hub no arch match for %s, using first: %s",
+                                repo, fallback[:19]
+                            )
+                            return fallback or None
+            except Exception as e:
+                _LOGGER.debug("Docker Hub manifest list GET failed for %s: %s", repo, e)
+
+            # Step 2: Single-arch image fallback — HEAD for manifest digest
+            single_headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": (
+                    "application/vnd.docker.distribution.manifest.v2+json,"
+                    "application/vnd.oci.image.manifest.v1+json"
+                ),
+            }
+            try:
+                async with session.head(
+                    manifest_url, headers=single_headers,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     if resp.status == 200:
                         return resp.headers.get("Docker-Content-Digest") or None
                     _LOGGER.debug("Docker Hub HEAD %s: HTTP %s", repo, resp.status)
