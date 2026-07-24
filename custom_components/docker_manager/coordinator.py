@@ -188,15 +188,25 @@ class DockerCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
 
     async def _load_desired_states(self) -> None:
-        """Load persisted container desired states from HA storage."""
+        """Load persisted data from HA storage."""
         data = await self._store.async_load()
         if data and isinstance(data, dict):
             self._desired_states = data.get("desired_states", {})
-            _LOGGER.debug("Loaded %d desired container states", len(self._desired_states))
+            # Restore update check results
+            self._update_cache: dict[str, dict] = data.get("update_cache", {})
+            _LOGGER.debug(
+                "Loaded %d desired states, %d cached update results",
+                len(self._desired_states), len(self._update_cache),
+            )
+        else:
+            self._update_cache = {}
 
     async def _save_desired_states(self) -> None:
-        """Persist container desired states to HA storage."""
-        await self._store.async_save({"desired_states": self._desired_states})
+        """Persist container desired states and update cache to HA storage."""
+        await self._store.async_save({
+            "desired_states": self._desired_states,
+            "update_cache": getattr(self, "_update_cache", {}),
+        })
 
     async def async_set_desired_state(self, name: str, state: str) -> None:
         """Record the desired state for a container and persist it."""
@@ -271,6 +281,18 @@ class DockerCoordinator(DataUpdateCoordinator):
                         cdata.latest_digest = prev.latest_digest
                         cdata.local_digest = prev.local_digest
                         cdata.last_update_check = prev.last_update_check
+                    elif cdata.name in getattr(self, "_update_cache", {}):
+                        # Restore from persistent storage after reboot
+                        cached = self._update_cache[cdata.name]
+                        cdata.update_available = cached.get("update_available", False)
+                        cdata.latest_digest = cached.get("latest_digest", "")
+                        cdata.local_digest = cached.get("local_digest", "")
+                        last_check = cached.get("last_update_check")
+                        if last_check:
+                            try:
+                                cdata.last_update_check = datetime.fromisoformat(last_check)
+                            except Exception:
+                                pass
 
                     # Compute network speed
                     if stats and cdata.name in self._prev_net:
@@ -755,6 +777,18 @@ class DockerCoordinator(DataUpdateCoordinator):
             cdata.local_digest = local_ref
             cdata.latest_digest = remote_digest[:19]
             cdata.last_update_check = datetime.now(timezone.utc)
+
+            # Persist to storage so results survive HA reboot
+            if not hasattr(self, "_update_cache"):
+                self._update_cache = {}
+            self._update_cache[container_name] = {
+                "update_available": update_available,
+                "local_digest": local_ref,
+                "latest_digest": remote_digest[:19],
+                "last_update_check": cdata.last_update_check.isoformat(),
+            }
+            # Save async without blocking
+            self.hass.async_create_task(self._save_desired_states())
 
             _LOGGER.info(
                 "Update check %s: local=%s remote=%s available=%s",
