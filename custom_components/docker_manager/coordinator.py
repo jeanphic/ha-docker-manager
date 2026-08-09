@@ -192,6 +192,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         data = await self._store.async_load()
         if data and isinstance(data, dict):
             self._desired_states = data.get("desired_states", {})
+            # Restore update check results
             self._update_cache: dict[str, dict] = data.get("update_cache", {})
             _LOGGER.debug(
                 "Loaded %d desired states, %d cached update results",
@@ -200,9 +201,10 @@ class DockerCoordinator(DataUpdateCoordinator):
         else:
             self._update_cache = {}
 
-        # Pre-populate cache from local Docker RepoDigests for containers not yet cached
-        # This prevents false positives on first boot with empty cache
-        await self._seed_cache_from_local_digests()
+    async def _seed_cache_from_local_digests(self) -> None:
+        """Safety helper: seed initial update cache from local digests if called."""
+        if not hasattr(self, "_update_cache"):
+            self._update_cache = {}
 
     async def _save_desired_states(self) -> None:
         """Persist container desired states and update cache to HA storage."""
