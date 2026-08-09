@@ -497,18 +497,23 @@ class DockerCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _parse_image_ref(image_name: str) -> tuple[str, str, str]:
+        """Parse image name into (registry, repo, tag)."""
         tag = "latest"
         if ":" in image_name.split("/")[-1]:
             image_name, tag = image_name.rsplit(":", 1)
 
-        known_registries = ("ghcr.io", "gcr.io", "quay.io", "mcr.microsoft.com", "lscr.io")
-        if "/" in image_name and image_name.split("/")[0] in known_registries:
-            parts = image_name.split("/", 1)
-            return parts[0], parts[1], tag
+        parts = image_name.split("/", 1)
+        if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
+            registry = parts[0]
+            repo = parts[1]
+        elif len(parts) > 1:
+            registry = "docker.io"
+            repo = image_name
+        else:
+            registry = "docker.io"
+            repo = f"library/{image_name}"
 
-        if "/" not in image_name:
-            return "docker.io", f"library/{image_name}", tag
-        return "docker.io", image_name, tag
+        return registry, repo, tag
 
     async def _get_remote_digest(self, image_name: str) -> str | None:
         """Get remote image digest without downloading — try registry API directly."""
@@ -526,23 +531,12 @@ class DockerCoordinator(DataUpdateCoordinator):
             return None
 
     @staticmethod
-    @staticmethod
     async def _get_dockerhub_digest(repo: str, tag: str) -> str | None:
-        """Get the architecture-specific digest from Docker Hub.
+        """Get the manifest list / image digest from Docker Hub using Docker-Content-Digest header.
 
-        For multi-arch images, the HEAD request returns the manifest list digest
-        which is DIFFERENT from the local image digest. We must resolve the
-        architecture-specific digest to compare correctly.
+        Docker Engine stores Docker-Content-Digest in RepoDigests when pulling.
+        We fetch the Docker-Content-Digest header directly to match what Docker Engine records.
         """
-        import platform as _platform
-        machine = _platform.machine().lower()
-        arch_map = {
-            "x86_64": "amd64", "amd64": "amd64",
-            "aarch64": "arm64", "arm64": "arm64",
-            "armv7l": "arm", "armv6l": "arm",
-        }
-        target_arch = arch_map.get(machine, "amd64")
-
         auth_url = (
             f"https://auth.docker.io/token"
             f"?service=registry.docker.io&scope=repository:{repo}:pull"
@@ -558,77 +552,24 @@ class DockerCoordinator(DataUpdateCoordinator):
                 return None
 
             manifest_url = f"https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
-
-            # Step 1: Try to get manifest list (multi-arch index)
-            list_headers = {
+            headers = {
                 "Authorization": f"Bearer {token}",
                 "Accept": (
                     "application/vnd.docker.distribution.manifest.list.v2+json,"
-                    "application/vnd.oci.image.index.v1+json"
-                ),
-            }
-            try:
-                async with session.get(
-                    manifest_url, headers=list_headers,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    if resp.status == 200:
-                        ct = resp.headers.get("Content-Type", "")
-                        data = await resp.json(content_type=None)
-                        manifests = data.get("manifests", [])
-
-                        if manifests:
-                            # Multi-arch: find our architecture
-                            for m in manifests:
-                                plat = m.get("platform", {})
-                                if (plat.get("architecture") == target_arch
-                                        and plat.get("os", "linux") == "linux"
-                                        and not plat.get("variant")):
-                                    arch_digest = m.get("digest", "")
-                                    _LOGGER.debug(
-                                        "Docker Hub [%s] %s:%s → %s",
-                                        target_arch, repo, tag, arch_digest[:19]
-                                    )
-                                    return arch_digest or None
-                            # Try with variant (e.g. arm/v7)
-                            for m in manifests:
-                                plat = m.get("platform", {})
-                                if (plat.get("architecture") == target_arch
-                                        and plat.get("os", "linux") == "linux"):
-                                    arch_digest = m.get("digest", "")
-                                    _LOGGER.debug(
-                                        "Docker Hub [%s variant] %s:%s → %s",
-                                        target_arch, repo, tag, arch_digest[:19]
-                                    )
-                                    return arch_digest or None
-                            # Fallback: first entry
-                            fallback = manifests[0].get("digest", "")
-                            _LOGGER.debug(
-                                "Docker Hub no arch match for %s, using first: %s",
-                                repo, fallback[:19]
-                            )
-                            return fallback or None
-            except Exception as e:
-                _LOGGER.debug("Docker Hub manifest list GET failed for %s: %s", repo, e)
-
-            # Step 2: Single-arch image fallback — HEAD for manifest digest
-            single_headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": (
+                    "application/vnd.oci.image.index.v1+json,"
                     "application/vnd.docker.distribution.manifest.v2+json,"
                     "application/vnd.oci.image.manifest.v1+json"
                 ),
             }
             try:
                 async with session.head(
-                    manifest_url, headers=single_headers,
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
                     if resp.status == 200:
                         return resp.headers.get("Docker-Content-Digest") or None
-                    _LOGGER.debug("Docker Hub HEAD %s: HTTP %s", repo, resp.status)
+                    _LOGGER.debug("Docker Hub HEAD %s:%s returned status %s", repo, tag, resp.status)
             except Exception as e:
-                _LOGGER.debug("Docker Hub HEAD error for %s: %s", repo, e)
+                _LOGGER.debug("Docker Hub HEAD error for %s:%s: %s", repo, tag, e)
         return None
 
     @staticmethod
@@ -729,7 +670,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         image_name = cdata.image
         if not image_name:
             return
-        if ":" not in image_name:
+        if ":" not in image_name.split("/")[-1]:
             image_name += ":latest"
 
         _LOGGER.debug("Checking update for %s (image: %s)", container_name, image_name)
@@ -748,13 +689,21 @@ class DockerCoordinator(DataUpdateCoordinator):
                 return
 
             repo_digests = local_image.get("RepoDigests", [])
-            local_digest = repo_digests[0].split("@")[-1] if repo_digests else ""
+            local_digest = ""
+            repo_base = image_name.split(":")[0]
+            for rd in repo_digests:
+                if "@" in rd and (rd.startswith(repo_base + "@") or repo_base.endswith(rd.split("@")[0])):
+                    local_digest = rd.split("@")[-1]
+                    break
+            if not local_digest and repo_digests:
+                local_digest = repo_digests[0].split("@")[-1]
+
             local_id = local_image.get("Id", "")
 
             # 2. Get remote digest
             remote_digest = await self._get_remote_digest(image_name)
             if not remote_digest:
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
                 remote_digest = await self._get_remote_digest(image_name)
 
             if not remote_digest:
@@ -763,19 +712,22 @@ class DockerCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(self.data)
                 return
 
+            # Normalize digests for comparison
+            norm_local = local_digest.strip().lower()
+            norm_remote = remote_digest.strip().lower()
+
             # 3. Compare
-            if local_digest:
-                update_available = local_digest != remote_digest
-                local_ref = local_digest[:19]
+            if norm_local:
+                update_available = norm_local != norm_remote
+                local_ref = norm_local[:19]
             else:
-                # No RepoDigest: use stored remote as baseline for comparison
-                prev_remote = cdata.latest_digest or ""
-                update_available = bool(prev_remote and prev_remote != remote_digest[:19])
-                local_ref = local_id[:19] if local_id else ""
+                prev_remote = (cdata.latest_digest or "").strip().lower()
+                update_available = bool(prev_remote and prev_remote != norm_remote[:19])
+                local_ref = norm_local[:19] if norm_local else (local_id[:19] if local_id else "local")
 
             cdata.update_available = update_available
             cdata.local_digest = local_ref
-            cdata.latest_digest = remote_digest[:19]
+            cdata.latest_digest = norm_remote[:19]
             cdata.last_update_check = datetime.now(timezone.utc)
 
             # Persist to storage so results survive HA reboot
@@ -784,7 +736,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             self._update_cache[container_name] = {
                 "update_available": update_available,
                 "local_digest": local_ref,
-                "latest_digest": remote_digest[:19],
+                "latest_digest": norm_remote[:19],
                 "last_update_check": cdata.last_update_check.isoformat(),
             }
             # Save async without blocking
@@ -792,7 +744,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
             _LOGGER.info(
                 "Update check %s: local=%s remote=%s available=%s",
-                container_name, local_ref, remote_digest[:19], update_available,
+                container_name, local_ref, norm_remote[:19], update_available,
             )
 
         except Exception as err:
@@ -998,25 +950,39 @@ class DockerCoordinator(DataUpdateCoordinator):
         await self.async_request_refresh()
 
     async def async_prune_images(self, all_unused: bool = False) -> dict:
-        """Remove unused Docker images — multiple passes to handle large sets."""
+        """Remove unused Docker images — multiple passes to handle large sets & multi-arch images."""
         if not self._client:
             return {}
         try:
-            import urllib.parse
-            if all_unused:
-                filters = urllib.parse.quote('{"dangling":["false"]}')
-            else:
-                filters = urllib.parse.quote('{"dangling":["true"]}')
+            import json
+
+            # Build JSON filter dictionary
+            # dangling: ["false"] prunes ALL unused images (including multi-arch parent/child manifests)
+            # dangling: ["true"] prunes only dangling (<none>:<none>) images
+            dangling_val = "false" if all_unused else "true"
+            filters_json = json.dumps({"dangling": [dangling_val]})
 
             total_deleted = 0
             total_space = 0
 
-            # Run up to 5 passes — Docker may not remove all images in one call
-            # when there are dependency chains between images
+            # Run up to 5 passes — Docker may not remove all multi-arch images in one pass
+            # due to parent/child manifest dependency chains
             for pass_num in range(1, 6):
-                response = await self._client._query_json(
-                    f"images/prune?filters={filters}", method="POST"
-                )
+                try:
+                    # Pass params dict so aiodocker & aiohttp handle URL encoding correctly
+                    # for both UNIX sockets and remote TCP/TLS Docker daemons
+                    response = await asyncio.wait_for(
+                        self._client._query_json(
+                            "images/prune",
+                            method="POST",
+                            params={"filters": filters_json},
+                        ),
+                        timeout=60,
+                    )
+                except Exception as err:
+                    _LOGGER.warning("Prune pass %d error: %s", pass_num, err)
+                    break
+
                 deleted_raw = response.get("ImagesDeleted")
                 if isinstance(deleted_raw, list):
                     deleted_count = len(deleted_raw)
@@ -1024,7 +990,8 @@ class DockerCoordinator(DataUpdateCoordinator):
                     deleted_count = deleted_raw
                 else:
                     deleted_count = 0
-                space = response.get("SpaceReclaimed", 0)
+
+                space = response.get("SpaceReclaimed", 0) or 0
                 total_deleted += deleted_count
                 total_space += space
 
@@ -1041,9 +1008,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                 "Prune complete: %d total image(s) removed, %.1f MB reclaimed",
                 total_deleted, total_space / (1024 * 1024),
             )
-            await asyncio.sleep(2)
-            await self.async_request_refresh()
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
             await self.async_request_refresh()
             return {"ImagesDeleted": total_deleted, "SpaceReclaimed": total_space}
         except Exception as err:
