@@ -518,6 +518,10 @@ class DockerCoordinator(DataUpdateCoordinator):
             registry = "docker.io"
             repo = f"library/{image_name}"
 
+        # lscr.io is an alias redirecting to ghcr.io
+        if registry == "lscr.io":
+            registry = "ghcr.io"
+
         return registry, repo, tag
 
     async def _get_remote_digest(self, image_name: str) -> str | None:
@@ -537,11 +541,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     async def _get_dockerhub_digest(repo: str, tag: str) -> str | None:
-        """Get the manifest list / image digest from Docker Hub using Docker-Content-Digest header.
-
-        Docker Engine stores Docker-Content-Digest in RepoDigests when pulling.
-        We fetch the Docker-Content-Digest header directly to match what Docker Engine records.
-        """
+        """Get the manifest list / image digest from Docker Hub using Docker-Content-Digest header."""
         auth_url = (
             f"https://auth.docker.io/token"
             f"?service=registry.docker.io&scope=repository:{repo}:pull"
@@ -583,10 +583,10 @@ class DockerCoordinator(DataUpdateCoordinator):
             manifest_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
             headers = {
                 "Accept": (
-                    "application/vnd.docker.distribution.manifest.v2+json,"
-                    "application/vnd.oci.image.manifest.v1+json,"
                     "application/vnd.docker.distribution.manifest.list.v2+json,"
-                    "application/vnd.oci.image.index.v1+json"
+                    "application/vnd.oci.image.index.v1+json,"
+                    "application/vnd.docker.distribution.manifest.v2+json,"
+                    "application/vnd.oci.image.manifest.v1+json"
                 ),
             }
             async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -612,51 +612,58 @@ class DockerCoordinator(DataUpdateCoordinator):
     async def _get_generic_registry_digest(registry: str, repo: str, tag: str) -> str | None:
         manifest_url = f"https://{registry}/v2/{repo}/manifests/{tag}"
         accept_header = (
-            "application/vnd.docker.distribution.manifest.v2+json,"
-            "application/vnd.oci.image.manifest.v1+json,"
             "application/vnd.docker.distribution.manifest.list.v2+json,"
-            "application/vnd.oci.image.index.v1+json"
+            "application/vnd.oci.image.index.v1+json,"
+            "application/vnd.docker.distribution.manifest.v2+json,"
+            "application/vnd.oci.image.manifest.v1+json"
         )
         async with aiohttp.ClientSession() as session:
             headers = {"Accept": accept_header}
-            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    return resp.headers.get("Docker-Content-Digest") or None
-                if resp.status != 401:
+            try:
+                async with session.head(manifest_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        return resp.headers.get("Docker-Content-Digest") or None
+                    if resp.status != 401:
+                        return None
+                    www_auth = resp.headers.get("Www-Authenticate", "")
+
+                if not www_auth.startswith("Bearer "):
                     return None
-                www_auth = resp.headers.get("Www-Authenticate", "")
 
-            if not www_auth.startswith("Bearer "):
-                return None
+                params: dict[str, str] = {}
+                for part in www_auth[len("Bearer "):].split(","):
+                    k, _, v = part.strip().partition("=")
+                    params[k.strip()] = v.strip().strip('"')
 
-            params: dict[str, str] = {}
-            for part in www_auth[len("Bearer "):].split(","):
-                k, _, v = part.strip().partition("=")
-                params[k.strip()] = v.strip().strip('"')
-
-            realm = params.get("realm", "")
-            if not realm:
-                return None
-
-            token_params = {}
-            if "service" in params:
-                token_params["service"] = params["service"]
-            if "scope" in params:
-                token_params["scope"] = params["scope"]
-
-            async with session.get(realm, params=token_params, timeout=aiohttp.ClientTimeout(total=10)) as tresp:
-                if tresp.status != 200:
+                realm = params.get("realm", "")
+                if not realm:
                     return None
-                token_data = await tresp.json()
-                token = token_data.get("token") or token_data.get("access_token", "")
 
-            if not token:
-                return None
+                token_params = {}
+                if "service" in params:
+                    token_params["service"] = params["service"]
+                if "scope" in params:
+                    token_params["scope"] = params["scope"]
 
-            headers["Authorization"] = f"Bearer {token}"
-            async with session.head(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
-                if resp2.status == 200:
-                    return resp2.headers.get("Docker-Content-Digest") or None
+                async with session.get(realm, params=token_params, timeout=aiohttp.ClientTimeout(total=10)) as tresp:
+                    if tresp.status != 200:
+                        return None
+                    token_data = await tresp.json()
+                    token = token_data.get("token") or token_data.get("access_token", "")
+
+                if not token:
+                    return None
+
+                final_url = manifest_url
+                if "ghcr.io" in realm and "ghcr.io" not in manifest_url:
+                    final_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
+
+                headers["Authorization"] = f"Bearer {token}"
+                async with session.head(final_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
+                    if resp2.status == 200:
+                        return resp2.headers.get("Docker-Content-Digest") or None
+            except Exception as e:
+                _LOGGER.debug("Generic registry digest error for %s/%s:%s: %s", registry, repo, tag, e)
         return None
 
     # ------------------------------------------------------------------ #
@@ -697,9 +704,11 @@ class DockerCoordinator(DataUpdateCoordinator):
             local_digest = ""
             repo_base = image_name.split(":")[0]
             for rd in repo_digests:
-                if "@" in rd and (rd.startswith(repo_base + "@") or repo_base.endswith(rd.split("@")[0])):
-                    local_digest = rd.split("@")[-1]
-                    break
+                if "@" in rd:
+                    rd_repo, rd_hash = rd.split("@", 1)
+                    if rd_repo == repo_base or repo_base.endswith(rd_repo) or rd_repo.endswith(repo_base):
+                        local_digest = rd_hash
+                        break
             if not local_digest and repo_digests:
                 local_digest = repo_digests[0].split("@")[-1]
 
@@ -717,22 +726,28 @@ class DockerCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(self.data)
                 return
 
-            # Normalize digests for comparison
-            norm_local = local_digest.strip().lower()
-            norm_remote = remote_digest.strip().lower()
+            def _clean_hash(h: str) -> str:
+                h = h.strip().lower()
+                return h[7:] if h.startswith("sha256:") else h
+
+            clean_local = _clean_hash(local_digest)
+            clean_remote = _clean_hash(remote_digest)
+            clean_id = _clean_hash(local_id)
 
             # 3. Compare
-            if norm_local:
-                update_available = norm_local != norm_remote
-                local_ref = norm_local[:19]
+            if clean_local:
+                update_available = clean_local != clean_remote
+                local_ref = f"sha256:{clean_local[:12]}"
             else:
-                prev_remote = (cdata.latest_digest or "").strip().lower()
-                update_available = bool(prev_remote and prev_remote != norm_remote[:19])
-                local_ref = norm_local[:19] if norm_local else (local_id[:19] if local_id else "local")
+                prev_remote = _clean_hash(cdata.latest_digest or "")
+                update_available = bool(prev_remote and prev_remote != clean_remote)
+                local_ref = f"sha256:{clean_id[:12]}" if clean_id else "local"
+
+            latest_ref = f"sha256:{clean_remote[:12]}"
 
             cdata.update_available = update_available
             cdata.local_digest = local_ref
-            cdata.latest_digest = norm_remote[:19]
+            cdata.latest_digest = latest_ref
             cdata.last_update_check = datetime.now(timezone.utc)
 
             # Persist to storage so results survive HA reboot
@@ -741,7 +756,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             self._update_cache[container_name] = {
                 "update_available": update_available,
                 "local_digest": local_ref,
-                "latest_digest": norm_remote[:19],
+                "latest_digest": latest_ref,
                 "last_update_check": cdata.last_update_check.isoformat(),
             }
             # Save async without blocking
@@ -749,7 +764,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
             _LOGGER.info(
                 "Update check %s: local=%s remote=%s available=%s",
-                container_name, local_ref, norm_remote[:19], update_available,
+                container_name, local_ref, latest_ref, update_available,
             )
 
         except Exception as err:
@@ -865,16 +880,29 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         was_running = info.get("State", {}).get("Status") == "running"
 
-        # ── 2. Pull new image ────────────────────────────────────────────
+        # Detect host architecture platform to avoid pulling all platforms
+        import platform as _platform
+        machine = _platform.machine().lower()
+        arch_map = {
+            "x86_64": "amd64", "amd64": "amd64",
+            "aarch64": "arm64", "arm64": "arm64",
+            "armv7l": "arm/v7", "armv6l": "arm/v6",
+        }
+        target_platform = f"linux/{arch_map.get(machine, 'amd64')}"
+
+        # ── 2. Pull new image (single platform) ─────────────────────────
         await _cb(15, "⏳ Pulling image...")
-        _LOGGER.info("[%s] Pulling %s", name, image_name)
+        _LOGGER.info("[%s] Pulling %s for platform %s", name, image_name, target_platform)
         try:
             async def _do_pull():
                 try:
-                    async for _ in self._client.images.pull(image_name, stream=True):
+                    async for _ in self._client.images.pull(image_name, platform=target_platform, stream=True):
                         pass
-                except TypeError:
-                    await self._client.images.pull(image_name)
+                except (TypeError, Exception):
+                    try:
+                        await self._client.images.pull(image_name, platform=target_platform)
+                    except TypeError:
+                        await self._client.images.pull(image_name)
 
             await asyncio.wait_for(_do_pull(), timeout=600)
             _LOGGER.info("[%s] Pull complete", name)
