@@ -507,6 +507,10 @@ class DockerCoordinator(DataUpdateCoordinator):
         if ":" in image_name.split("/")[-1]:
             image_name, tag = image_name.rsplit(":", 1)
 
+        # Resolve lscr.io redirect domain directly to ghcr.io
+        if image_name.startswith("lscr.io/"):
+            image_name = image_name.replace("lscr.io/", "ghcr.io/")
+
         parts = image_name.split("/", 1)
         if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
             registry = parts[0]
@@ -517,10 +521,6 @@ class DockerCoordinator(DataUpdateCoordinator):
         else:
             registry = "docker.io"
             repo = f"library/{image_name}"
-
-        # lscr.io is an alias redirecting to ghcr.io
-        if registry == "lscr.io":
-            registry = "ghcr.io"
 
         return registry, repo, tag
 
@@ -881,6 +881,10 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not image_name:
             _LOGGER.error("Cannot determine image for container %s", name)
             return
+
+        # Resolve lscr.io domain alias directly to ghcr.io to prevent Docker 307 redirect dropping platform parameter
+        if image_name.startswith("lscr.io/"):
+            image_name = image_name.replace("lscr.io/", "ghcr.io/")
 
         was_running = info.get("State", {}).get("Status") == "running"
 
