@@ -702,11 +702,15 @@ class DockerCoordinator(DataUpdateCoordinator):
 
             repo_digests = local_image.get("RepoDigests", [])
             local_digest = ""
-            repo_base = image_name.split(":")[0]
+            # Extract pure repo path (e.g. "linuxserver/duckdns" from "lscr.io/linuxserver/duckdns:latest")
+            pure_repo = image_name.split(":")[0]
+            if "/" in pure_repo and ("." in pure_repo.split("/")[0] or ":" in pure_repo.split("/")[0]):
+                pure_repo = pure_repo.split("/", 1)[1]
+
             for rd in repo_digests:
                 if "@" in rd:
                     rd_repo, rd_hash = rd.split("@", 1)
-                    if rd_repo == repo_base or repo_base.endswith(rd_repo) or rd_repo.endswith(repo_base):
+                    if pure_repo in rd_repo or rd_repo in image_name or pure_repo in rd:
                         local_digest = rd_hash
                         break
             if not local_digest and repo_digests:
@@ -880,7 +884,14 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         was_running = info.get("State", {}).get("Status") == "running"
 
-        # Detect host architecture platform to avoid pulling all platforms
+        # Parse repo & tag for Docker Engine API POST /images/create
+        if ":" in image_name.split("/")[-1]:
+            repo, tag = image_name.rsplit(":", 1)
+        else:
+            repo = image_name
+            tag = "latest"
+
+        # Detect host architecture platform
         import platform as _platform
         machine = _platform.machine().lower()
         arch_map = {
@@ -890,19 +901,32 @@ class DockerCoordinator(DataUpdateCoordinator):
         }
         target_platform = f"linux/{arch_map.get(machine, 'amd64')}"
 
-        # ── 2. Pull new image (single platform) ─────────────────────────
+        # ── 2. Pull new image (single platform via direct Docker API call) ──
         await _cb(15, "⏳ Pulling image...")
-        _LOGGER.info("[%s] Pulling %s for platform %s", name, image_name, target_platform)
+        _LOGGER.info("[%s] Pulling %s:%s for platform %s", name, repo, tag, target_platform)
+
+        pull_params = {
+            "fromImage": repo,
+            "tag": tag,
+            "platform": target_platform,
+        }
+
         try:
             async def _do_pull():
                 try:
-                    async for _ in self._client.images.pull(image_name, platform=target_platform, stream=True):
+                    # Direct query to Docker API POST /images/create with explicit platform parameter
+                    response = await self._client._query(
+                        "images/create",
+                        method="POST",
+                        params=pull_params,
+                    )
+                    async with response:
+                        async for _ in response.content:
+                            pass
+                except Exception as err:
+                    _LOGGER.warning("[%s] Direct platform pull error (%s) — using fallback", name, err)
+                    async for _ in self._client.images.pull(image_name, stream=True):
                         pass
-                except (TypeError, Exception):
-                    try:
-                        await self._client.images.pull(image_name, platform=target_platform)
-                    except TypeError:
-                        await self._client.images.pull(image_name)
 
             await asyncio.wait_for(_do_pull(), timeout=600)
             _LOGGER.info("[%s] Pull complete", name)
