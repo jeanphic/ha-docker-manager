@@ -9,9 +9,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, ICON_RESTART, ICON_UPDATE, HA_CONTAINER_NAMES
+from .const import DOMAIN, ICON_RESTART, ICON_UPDATE, ICON_PRUNE, HA_CONTAINER_NAMES
 from .coordinator import DockerCoordinator
-from .entity import DockerContainerEntity
+from .entity import DockerBaseEntity, DockerContainerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,18 +23,13 @@ async def async_setup_entry(
 ) -> None:
     coordinator: DockerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Remove only truly obsolete entities (pre-v2.9.3 naming)
-    from homeassistant.helpers import entity_registry as er
-    registry = er.async_get(hass)
-    for entity_entry in list(registry.entities.values()):
-        if entity_entry.config_entry_id != entry.entry_id:
-            continue
-        uid = entity_entry.unique_id or ""
-        if uid.endswith("_pause_unpause"):
-            _LOGGER.info("Removing obsolete entity: %s", entity_entry.entity_id)
-            registry.async_remove(entity_entry.entity_id)
+    # Global buttons attached to main Docker device
+    entities: list[ButtonEntity] = [
+        DockerPruneButton(coordinator),
+        DockerCheckAllUpdatesButton(coordinator),
+    ]
 
-    entities: list[ButtonEntity] = []
+    # Per-container buttons
     for name in coordinator.data or {}:
         entities.append(DockerRestartButton(coordinator, name))
         entities.append(DockerPauseButton(coordinator, name))
@@ -43,11 +38,9 @@ async def async_setup_entry(
     async_add_entities(entities)
 
     def _handle_update() -> None:
-        # Use the ACTUAL unique_ids of each button class — not a reconstructed suffix
         new: list[ButtonEntity] = []
         existing_ids = {e.unique_id for e in entities}
         for name in coordinator.data or {}:
-            # unique_id for each button type must match what the class sets
             uid_restart = f"{coordinator.entry_id}_{name}_restart"
             uid_pause   = f"{coordinator.entry_id}_{name}_pause_v3"
             uid_check   = f"{coordinator.entry_id}_{name}_check_update"
@@ -65,6 +58,43 @@ async def async_setup_entry(
                 entities.append(e)
 
     coordinator.async_add_listener(_handle_update)
+
+
+class DockerPruneButton(DockerBaseEntity, ButtonEntity):
+    """Button to prune unused Docker images on the host."""
+
+    _attr_icon = ICON_PRUNE
+    _attr_name = "Prune Unused Images"
+
+    def __init__(self, coordinator: DockerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry_id}_prune_images"
+        self._attr_entity_category = EntityCategory.CONFIG
+
+    async def async_press(self) -> None:
+        _LOGGER.info("Prune unused images button pressed")
+        res = await self.coordinator.async_prune_images(all_unused=True)
+        _LOGGER.info(
+            "Prune result: %s image(s) removed, %s bytes reclaimed",
+            res.get("ImagesDeleted", 0),
+            res.get("SpaceReclaimed", 0),
+        )
+
+
+class DockerCheckAllUpdatesButton(DockerBaseEntity, ButtonEntity):
+    """Button to check for updates on all monitored containers."""
+
+    _attr_icon = ICON_UPDATE
+    _attr_name = "Check All Updates"
+
+    def __init__(self, coordinator: DockerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry_id}_check_all_updates"
+        self._attr_entity_category = EntityCategory.CONFIG
+
+    async def async_press(self) -> None:
+        _LOGGER.info("Check all container updates button pressed")
+        await self.coordinator.async_check_all_updates()
 
 
 class DockerRestartButton(DockerContainerEntity, ButtonEntity):

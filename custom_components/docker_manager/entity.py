@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import DOMAIN, ICON_DOCKER
 from .coordinator import DockerCoordinator, ContainerData
@@ -17,7 +17,7 @@ class DockerBaseEntity(CoordinatorEntity[DockerCoordinator]):
         super().__init__(coordinator)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.entry_id)},
-            name="Docker",
+            name="Docker Host",
             manufacturer="Docker Inc.",
             model=f"Docker Engine {coordinator.docker_version}",
             sw_version=coordinator.docker_version,

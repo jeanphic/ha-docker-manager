@@ -28,7 +28,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Docker Manager from a config entry."""
     url = entry.data.get(CONF_URL, DEFAULT_URL)
 
-    # Options always take priority over initial data (set after first setup)
     included_containers: list[str] = list(
         entry.options.get(
             CONF_CONTAINERS_INCLUDE,
@@ -65,7 +64,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await coordinator.async_config_entry_first_refresh()
 
-    # Restore container states from before HA restart (stopped/paused containers)
+    # Restore container states from before HA restart
     await coordinator.async_restore_container_states()
 
     # Start container state watcher for down notifications (if enabled)
@@ -86,15 +85,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # --- Service: prune unused images ---
     async def handle_prune(call: ServiceCall) -> None:
-        entry_id = call.data.get("entry_id", entry.entry_id)
-        all_unused = call.data.get("all_unused", False)
-        coord: DockerCoordinator = hass.data[DOMAIN].get(entry_id, coordinator)
+        entry_id = call.data.get("entry_id")
+        all_unused = call.data.get("all_unused", True)
+        if entry_id and entry_id in hass.data[DOMAIN]:
+            coord: DockerCoordinator = hass.data[DOMAIN][entry_id]
+        else:
+            coord = coordinator
+
         result = await coord.async_prune_images(all_unused=all_unused)
         _LOGGER.info(
             "Docker prune completed: %s images deleted, %s bytes reclaimed",
-            result.get("ImagesDeleted") if isinstance(result.get("ImagesDeleted"), int) else len(result.get("ImagesDeleted") or []),
+            result.get("ImagesDeleted", 0),
             result.get("SpaceReclaimed", 0),
         )
+
+    # --- Service: check all updates ---
+    async def handle_check_all_updates(call: ServiceCall) -> None:
+        entry_id = call.data.get("entry_id")
+        if entry_id and entry_id in hass.data[DOMAIN]:
+            coord: DockerCoordinator = hass.data[DOMAIN][entry_id]
+        else:
+            coord = coordinator
+
+        await coord.async_check_all_updates()
 
     hass.services.async_register(
         DOMAIN,
@@ -102,7 +115,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         handle_prune,
         schema=vol.Schema({
             vol.Optional("entry_id"): str,
-            vol.Optional("all_unused", default=False): bool,
+            vol.Optional("all_unused", default=True): bool,
+        }),
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        "check_all_updates",
+        handle_check_all_updates,
+        schema=vol.Schema({
+            vol.Optional("entry_id"): str,
         }),
     )
 
@@ -119,5 +141,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.data[DOMAIN]:
         hass.services.async_remove(DOMAIN, "prune_images")
+        hass.services.async_remove(DOMAIN, "check_all_updates")
 
     return unload_ok

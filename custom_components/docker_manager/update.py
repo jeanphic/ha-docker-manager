@@ -56,7 +56,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
         self._attr_name = "Update"
         self._in_progress: bool | int = False
         self._step_label: str = ""
-        self._install_lock = False  # prevent parallel installs""
+        self._install_lock = False
 
     @property
     def title(self) -> str:
@@ -103,6 +103,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             "image": data.image,
             "local_digest": data.local_digest,
             "remote_digest": data.latest_digest,
+            "update_available": data.update_available,
             "last_check": (
                 data.last_update_check.isoformat()
                 if data.last_update_check else None
@@ -136,7 +137,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
                 self._container_name,
                 progress_callback=self._set_step,
             )
-            # Immediately mark update as done so HA counter decrements
+            # Mark update as completed
             cdata = self.coordinator.get_container_data(self._container_name)
             if cdata:
                 cdata.update_available = False
@@ -151,11 +152,9 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             return
 
         finally:
-            # Short pause so user sees "complete", then reset all state
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             self._in_progress = False
             self._step_label = ""
             self._install_lock = False
-            # Write state BEFORE refresh so HA sees update_available=False immediately
             self.async_write_ha_state()
             await self.coordinator.async_request_refresh()

@@ -2,12 +2,29 @@ prune_images:
   name: Prune Images
   description: Remove unused Docker images to free up disk space.
   fields:
+    entry_id:
+      name: Instance ID
+      description: Optional config entry ID.
+      required: false
+      selector:
+        text:
     all_unused:
       name: All unused
       description: >
-        If true, removes ALL images not used by any container.
-        If false (default), removes only dangling (untagged) images.
+        If true (default), removes ALL images not used by any container.
+        If false, removes only dangling (untagged) images.
       required: false
-      default: false
+      default: true
       selector:
         boolean:
+
+check_all_updates:
+  name: Check All Updates
+  description: Check for newer images across all monitored containers.
+  fields:
+    entry_id:
+      name: Instance ID
+      description: Optional config entry ID.
+      required: false
+      selector:
+        text:

@@ -63,6 +63,20 @@
         "entry_id": {
           "name": "Instance",
           "description": "Config entry ID (optional)."
+        },
+        "all_unused": {
+          "name": "All unused images",
+          "description": "Remove all images not used by running/stopped containers."
+        }
+      }
+    },
+    "check_all_updates": {
+      "name": "Check All Updates",
+      "description": "Check for image updates across all monitored containers.",
+      "fields": {
+        "entry_id": {
+          "name": "Instance",
+          "description": "Config entry ID (optional)."
         }
       }
     }

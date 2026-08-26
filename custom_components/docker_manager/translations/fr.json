@@ -63,6 +63,20 @@
         "entry_id": {
           "name": "Instance",
           "description": "ID de l'entrée de configuration (optionnel)."
+        },
+        "all_unused": {
+          "name": "Toutes les images inutilisées",
+          "description": "Supprime toutes les images non utilisées par les conteneurs."
+        }
+      }
+    },
+    "check_all_updates": {
+      "name": "Vérifier toutes les mises à jour",
+      "description": "Vérifie les mises à jour pour l'ensemble des conteneurs supervisés.",
+      "fields": {
+        "entry_id": {
+          "name": "Instance",
+          "description": "ID de l'entrée de configuration (optionnel)."
         }
       }
     }
