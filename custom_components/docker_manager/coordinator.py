@@ -31,22 +31,6 @@ STORAGE_VERSION = 1
 STORAGE_KEY = "docker_manager_container_states"
 
 
-def _get_host_platform() -> tuple[str, str, str | None]:
-    """Return (os, arch, variant) for host architecture matching Docker manifests."""
-    machine = _platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
-        return "linux", "amd64", None
-    elif machine in ("aarch64", "arm64"):
-        return "linux", "arm64", None
-    elif machine.startswith("armv7") or machine == "armhf":
-        return "linux", "arm", "v7"
-    elif machine.startswith("armv6"):
-        return "linux", "arm", "v6"
-    elif machine.startswith("arm"):
-        return "linux", "arm", None
-    return "linux", "amd64", None
-
-
 def _extract_platform_digest(manifest_data: dict, target_arch: str, target_variant: str | None = None) -> str | None:
     """Extract architecture-specific digest from a Docker Manifest List / OCI Index."""
     manifests = manifest_data.get("manifests", [])
@@ -69,7 +53,6 @@ def _extract_platform_digest(manifest_data: dict, target_arch: str, target_varia
         if p.get("architecture") == target_arch:
             return m.get("digest")
 
-    # Fallback to first available manifest
     return manifests[0].get("digest")
 
 
@@ -191,6 +174,8 @@ class DockerCoordinator(DataUpdateCoordinator):
         self._prev_net: dict[str, dict] = {}
         self._prev_net_time: dict[str, datetime] = {}
         self.docker_version: str = ""
+        self.system_arch: str = "amd64"
+        self.system_variant: str | None = None
         self.images_total: int = 0
         self._update_cache: dict[str, dict] = {}
         # HA storage for persisting container states across restarts
@@ -202,11 +187,32 @@ class DockerCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
 
     async def async_connect(self) -> None:
-        """Connect to the Docker daemon."""
+        """Connect to the Docker daemon (local socket or remote TCP)."""
         self._client = aiodocker.Docker(url=self.url)
         info = await self._client.system.info()
         self.docker_version = info.get("ServerVersion", "unknown")
-        _LOGGER.info("Connected to Docker %s at %s", self.docker_version, self.url)
+
+        raw_arch = (info.get("Architecture") or "").lower()
+        if raw_arch in ("x86_64", "amd64"):
+            self.system_arch = "amd64"
+            self.system_variant = None
+        elif raw_arch in ("aarch64", "arm64"):
+            self.system_arch = "arm64"
+            self.system_variant = None
+        elif "armv7" in raw_arch or raw_arch == "armhf":
+            self.system_arch = "arm"
+            self.system_variant = "v7"
+        elif "armv6" in raw_arch:
+            self.system_arch = "arm"
+            self.system_variant = "v6"
+        else:
+            self.system_arch = "amd64"
+            self.system_variant = None
+
+        _LOGGER.info(
+            "Connected to Docker %s (%s) at %s",
+            self.docker_version, self.system_arch, self.url
+        )
 
         # Load persisted container states
         await self._load_desired_states()
@@ -236,7 +242,6 @@ class DockerCoordinator(DataUpdateCoordinator):
         data = await self._store.async_load()
         if data and isinstance(data, dict):
             self._desired_states = data.get("desired_states", {})
-            # Restore update check results
             self._update_cache = data.get("update_cache", {})
             _LOGGER.debug(
                 "Loaded %d desired states, %d cached update results",
@@ -318,7 +323,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
                     cdata = ContainerData(info, stats)
 
-                    # Preserve update info from previous cycle or restored cache
+                    # Preserve update info from previous cycle in-memory
                     if self.data and cdata.name in self.data:
                         prev: ContainerData = self.data[cdata.name]
                         cdata.update_available = prev.update_available
@@ -326,9 +331,9 @@ class DockerCoordinator(DataUpdateCoordinator):
                         cdata.local_digest = prev.local_digest
                         cdata.last_update_check = prev.last_update_check
                     elif cdata.name in self._update_cache:
-                        # Restore from persistent storage after reboot
+                        # On HA startup/reboot, default update_available to False until checked
                         cached = self._update_cache[cdata.name]
-                        cdata.update_available = cached.get("update_available", False)
+                        cdata.update_available = False
                         cdata.latest_digest = cached.get("latest_digest", "")
                         cdata.local_digest = cached.get("local_digest", "")
                         last_check = cached.get("last_update_check")
@@ -497,7 +502,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Auto-check task crashed: %s", err, exc_info=True)
 
     # ------------------------------------------------------------------ #
-    # Registry digest helpers (Multi-Arch Aware)
+    # Registry digest helpers (Target Daemon Architecture Aware)
     # ------------------------------------------------------------------ #
 
     @staticmethod
@@ -507,7 +512,6 @@ class DockerCoordinator(DataUpdateCoordinator):
         if ":" in image_name.split("/")[-1]:
             image_name, tag = image_name.rsplit(":", 1)
 
-        # Resolve lscr.io redirect domain directly to ghcr.io
         if image_name.startswith("lscr.io/"):
             image_name = image_name.replace("lscr.io/", "ghcr.io/")
 
@@ -524,39 +528,40 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         return registry, repo, tag
 
-    async def _get_remote_digest(self, image_name: str) -> str | None:
-        """Get remote image digest matching host architecture without downloading."""
+    async def _get_remote_digests(self, image_name: str) -> tuple[str | None, str | None]:
+        """Get (remote_index_digest, remote_platform_digest) for target daemon arch."""
         registry, repo, tag = self._parse_image_ref(image_name)
 
         try:
             if registry == "docker.io":
-                return await self._get_dockerhub_digest(repo, tag)
+                return await self._get_dockerhub_digests(repo, tag, self.system_arch, self.system_variant)
             elif registry == "ghcr.io":
-                return await self._get_ghcr_digest(repo, tag)
+                return await self._get_ghcr_digests(repo, tag, self.system_arch, self.system_variant)
             else:
-                return await self._get_generic_registry_digest(registry, repo, tag)
+                return await self._get_generic_registry_digests(registry, repo, tag, self.system_arch, self.system_variant)
         except Exception as e:
             _LOGGER.debug("Registry API failed for %s: %s", image_name, e)
-            return None
+            return None, None
 
     @staticmethod
-    async def _get_dockerhub_digest(repo: str, tag: str) -> str | None:
-        """Get host architecture platform digest from Docker Hub."""
+    async def _get_dockerhub_digests(
+        repo: str, tag: str, target_arch: str, target_variant: str | None
+    ) -> tuple[str | None, str | None]:
+        """Get index digest and target daemon platform digest from Docker Hub."""
         auth_url = (
             f"https://auth.docker.io/token"
             f"?service=registry.docker.io&scope=repository:{repo}:pull"
         )
-        _, target_arch, target_variant = _get_host_platform()
 
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(auth_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
-                        return None
+                        return None, None
                     token = (await resp.json()).get("token", "")
             except Exception as e:
                 _LOGGER.debug("Docker Hub auth failed for %s: %s", repo, e)
-                return None
+                return None, None
 
             manifest_url = f"https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
             headers = {
@@ -573,22 +578,22 @@ class DockerCoordinator(DataUpdateCoordinator):
                     manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
                     if resp.status == 200:
+                        header_digest = resp.headers.get("Docker-Content-Digest") or None
                         ct = resp.headers.get("Content-Type", "")
+                        platform_digest = None
                         if "manifest.list" in ct or "image.index" in ct:
                             data = await resp.json()
-                            digest = _extract_platform_digest(data, target_arch, target_variant)
-                            if digest:
-                                return digest
-                        return resp.headers.get("Docker-Content-Digest") or None
-                    _LOGGER.debug("Docker Hub GET %s:%s returned status %s", repo, tag, resp.status)
+                            platform_digest = _extract_platform_digest(data, target_arch, target_variant)
+                        return header_digest, platform_digest
             except Exception as e:
                 _LOGGER.debug("Docker Hub GET error for %s:%s: %s", repo, tag, e)
-        return None
+        return None, None
 
     @staticmethod
-    async def _get_ghcr_digest(repo: str, tag: str) -> str | None:
-        """Get host architecture platform digest from GHCR."""
-        _, target_arch, target_variant = _get_host_platform()
+    async def _get_ghcr_digests(
+        repo: str, tag: str, target_arch: str, target_variant: str | None
+    ) -> tuple[str | None, str | None]:
+        """Get index digest and target daemon platform digest from GHCR."""
         async with aiohttp.ClientSession() as session:
             manifest_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
             headers = {
@@ -601,13 +606,13 @@ class DockerCoordinator(DataUpdateCoordinator):
             }
             async with session.get(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
+                    header_digest = resp.headers.get("Docker-Content-Digest") or None
                     ct = resp.headers.get("Content-Type", "")
+                    platform_digest = None
                     if "manifest.list" in ct or "image.index" in ct:
                         data = await resp.json()
-                        digest = _extract_platform_digest(data, target_arch, target_variant)
-                        if digest:
-                            return digest
-                    return resp.headers.get("Docker-Content-Digest") or None
+                        platform_digest = _extract_platform_digest(data, target_arch, target_variant)
+                    return header_digest, platform_digest
 
                 if resp.status == 401:
                     www_auth = resp.headers.get("Www-Authenticate", "")
@@ -623,19 +628,20 @@ class DockerCoordinator(DataUpdateCoordinator):
                         headers["Authorization"] = f"Bearer {token}"
                         async with session.get(manifest_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
                             if resp2.status == 200:
+                                header_digest = resp2.headers.get("Docker-Content-Digest") or None
                                 ct = resp2.headers.get("Content-Type", "")
+                                platform_digest = None
                                 if "manifest.list" in ct or "image.index" in ct:
                                     data = await resp2.json()
-                                    digest = _extract_platform_digest(data, target_arch, target_variant)
-                                    if digest:
-                                        return digest
-                                return resp2.headers.get("Docker-Content-Digest") or None
-        return None
+                                    platform_digest = _extract_platform_digest(data, target_arch, target_variant)
+                                return header_digest, platform_digest
+        return None, None
 
     @staticmethod
-    async def _get_generic_registry_digest(registry: str, repo: str, tag: str) -> str | None:
-        """Get host architecture platform digest from generic V2 registry."""
-        _, target_arch, target_variant = _get_host_platform()
+    async def _get_generic_registry_digests(
+        registry: str, repo: str, tag: str, target_arch: str, target_variant: str | None
+    ) -> tuple[str | None, str | None]:
+        """Get index digest and target daemon platform digest from generic V2 registry."""
         manifest_url = f"https://{registry}/v2/{repo}/manifests/{tag}"
         accept_header = (
             "application/vnd.docker.distribution.manifest.list.v2+json,"
@@ -648,19 +654,19 @@ class DockerCoordinator(DataUpdateCoordinator):
             try:
                 async with session.get(manifest_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
+                        header_digest = resp.headers.get("Docker-Content-Digest") or None
                         ct = resp.headers.get("Content-Type", "")
+                        platform_digest = None
                         if "manifest.list" in ct or "image.index" in ct:
                             data = await resp.json()
-                            digest = _extract_platform_digest(data, target_arch, target_variant)
-                            if digest:
-                                return digest
-                        return resp.headers.get("Docker-Content-Digest") or None
+                            platform_digest = _extract_platform_digest(data, target_arch, target_variant)
+                        return header_digest, platform_digest
                     if resp.status != 401:
-                        return None
+                        return None, None
                     www_auth = resp.headers.get("Www-Authenticate", "")
 
                 if not www_auth.startswith("Bearer "):
-                    return None
+                    return None, None
 
                 params: dict[str, str] = {}
                 for part in www_auth[len("Bearer "):].split(","):
@@ -669,7 +675,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
                 realm = params.get("realm", "")
                 if not realm:
-                    return None
+                    return None, None
 
                 token_params = {}
                 if "service" in params:
@@ -679,12 +685,12 @@ class DockerCoordinator(DataUpdateCoordinator):
 
                 async with session.get(realm, params=token_params, timeout=aiohttp.ClientTimeout(total=10)) as tresp:
                     if tresp.status != 200:
-                        return None
+                        return None, None
                     token_data = await tresp.json()
                     token = token_data.get("token") or token_data.get("access_token", "")
 
                 if not token:
-                    return None
+                    return None, None
 
                 final_url = manifest_url
                 if "ghcr.io" in realm and "ghcr.io" not in manifest_url:
@@ -693,16 +699,16 @@ class DockerCoordinator(DataUpdateCoordinator):
                 headers["Authorization"] = f"Bearer {token}"
                 async with session.get(final_url, headers=headers, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
                     if resp2.status == 200:
+                        header_digest = resp2.headers.get("Docker-Content-Digest") or None
                         ct = resp2.headers.get("Content-Type", "")
+                        platform_digest = None
                         if "manifest.list" in ct or "image.index" in ct:
                             data = await resp2.json()
-                            digest = _extract_platform_digest(data, target_arch, target_variant)
-                            if digest:
-                                return digest
-                        return resp2.headers.get("Docker-Content-Digest") or None
+                            platform_digest = _extract_platform_digest(data, target_arch, target_variant)
+                        return header_digest, platform_digest
             except Exception as e:
                 _LOGGER.debug("Generic registry digest error for %s/%s:%s: %s", registry, repo, tag, e)
-        return None
+        return None, None
 
     # ------------------------------------------------------------------ #
     # Update check
@@ -720,6 +726,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         image_name = cdata.image
         if not image_name:
             return
+
         if ":" not in image_name.split("/")[-1]:
             image_name += ":latest"
 
@@ -755,43 +762,52 @@ class DockerCoordinator(DataUpdateCoordinator):
 
             local_id = local_image.get("Id", "")
 
-            # 2. Get remote digest
-            remote_digest = await self._get_remote_digest(image_name)
-            if not remote_digest:
+            # 2. Get remote digests (index digest + platform digest matching target daemon arch)
+            remote_index_digest, remote_platform_digest = await self._get_remote_digests(image_name)
+            if not remote_index_digest and not remote_platform_digest:
                 await asyncio.sleep(1)
-                remote_digest = await self._get_remote_digest(image_name)
+                remote_index_digest, remote_platform_digest = await self._get_remote_digests(image_name)
 
-            if not remote_digest:
+            if not remote_index_digest and not remote_platform_digest:
                 _LOGGER.debug("No remote digest for %s — skipping", container_name)
                 cdata.last_update_check = datetime.now(timezone.utc)
                 self.async_set_updated_data(self.data)
                 return
 
-            def _clean_hash(h: str) -> str:
+            def _clean_hash(h: str | None) -> str:
+                if not h:
+                    return ""
                 h = h.strip().lower()
                 return h[7:] if h.startswith("sha256:") else h
 
             clean_local = _clean_hash(local_digest)
-            clean_remote = _clean_hash(remote_digest)
+            clean_remote_index = _clean_hash(remote_index_digest)
+            clean_remote_platform = _clean_hash(remote_platform_digest)
             clean_id = _clean_hash(local_id)
 
-            # 3. Compare architecture-specific digests
+            # 3. Dual-digest comparison logic
+            # Image is UP TO DATE if local digest matches EITHER remote index digest OR remote platform digest
             if clean_local:
-                update_available = clean_local != clean_remote
+                is_up_to_date = (
+                    (clean_remote_index != "" and clean_local == clean_remote_index)
+                    or (clean_remote_platform != "" and clean_local == clean_remote_platform)
+                )
+                update_available = not is_up_to_date
                 local_ref = f"sha256:{clean_local[:12]}"
             else:
-                prev_remote = _clean_hash(cdata.latest_digest or "")
-                update_available = bool(prev_remote and prev_remote != clean_remote)
+                # If local_digest is empty (e.g. untagged local build / custom tag), do NOT flag false update
+                update_available = False
                 local_ref = f"sha256:{clean_id[:12]}" if clean_id else "local"
 
-            latest_ref = f"sha256:{clean_remote[:12]}"
+            best_remote = clean_remote_platform or clean_remote_index
+            latest_ref = f"sha256:{best_remote[:12]}" if best_remote else "latest"
 
             cdata.update_available = update_available
             cdata.local_digest = local_ref
             cdata.latest_digest = latest_ref
             cdata.last_update_check = datetime.now(timezone.utc)
 
-            # Persist to storage so results survive HA reboot cleanly
+            # Persist to storage
             self._update_cache[container_name] = {
                 "update_available": update_available,
                 "local_digest": local_ref,
@@ -801,8 +817,8 @@ class DockerCoordinator(DataUpdateCoordinator):
             self.hass.async_create_task(self._save_desired_states())
 
             _LOGGER.info(
-                "Update check %s: local=%s remote=%s available=%s",
-                container_name, local_ref, latest_ref, update_available,
+                "Update check %s: local=%s remote_index=%s remote_plat=%s available=%s",
+                container_name, local_ref, clean_remote_index[:12] if clean_remote_index else "none", clean_remote_platform[:12] if clean_remote_platform else "none", update_available,
             )
 
         except Exception as err:
@@ -923,8 +939,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             repo = image_name
             tag = "latest"
 
-        _, target_arch, target_variant = _get_host_platform()
-        plat_str = f"linux/{target_arch}" + (f"/{target_variant}" if target_variant else "")
+        plat_str = f"linux/{self.system_arch}" + (f"/{self.system_variant}" if self.system_variant else "")
 
         # ── 2. Pull new image ──
         await _cb(15, "⏳ Pulling image...")
@@ -1035,23 +1050,51 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         await self.async_request_refresh()
 
-    async def async_prune_images(self, all_unused: bool = False) -> dict:
-        """Remove unused Docker images — handles multi-pass and stopped container warnings."""
+    async def async_prune_images(
+        self, all_unused: bool = True, remove_stopped_containers: bool = False
+    ) -> dict:
+        """Remove unused Docker images — handles stopped container warnings & optional container cleanup."""
         if not self._client:
             return {}
         try:
-            # Check for stopped containers that might hold images in use
             containers_raw = await self._client.containers.list(all=True)
-            stopped_containers = [
-                c.get("Names", ["/unknown"])[0].lstrip("/")
-                for c in containers_raw
-                if c.get("State") in ("exited", "created", "dead")
-            ]
-            if stopped_containers:
+            stopped_containers: list[tuple[Any, str]] = []
+            for c in containers_raw:
+                info = await c.show()
+                cname = info.get("Name", "").lstrip("/")
+                status = info.get("State", {}).get("Status", "")
+                if status in ("exited", "created", "dead"):
+                    stopped_containers.append((c, cname))
+
+            # Optional: remove stopped containers first if requested
+            containers_removed = 0
+            if remove_stopped_containers and stopped_containers:
+                for container_obj, cname in stopped_containers:
+                    if self._is_ha_container(cname):
+                        continue
+                    try:
+                        _LOGGER.info("Prune: removing stopped container %s", cname)
+                        await container_obj.delete(force=True)
+                        containers_removed += 1
+                    except Exception as e:
+                        _LOGGER.warning("Prune: failed to remove container %s: %s", cname, e)
+
+                # Re-fetch stopped containers list after deletion
+                containers_raw = await self._client.containers.list(all=True)
+                stopped_containers = []
+                for c in containers_raw:
+                    info = await c.show()
+                    cname = info.get("Name", "").lstrip("/")
+                    status = info.get("State", {}).get("Status", "")
+                    if status in ("exited", "created", "dead"):
+                        stopped_containers.append((c, cname))
+
+            stopped_names = [name for _, name in stopped_containers]
+            if stopped_names:
                 _LOGGER.warning(
-                    "Prune notice: %d stopped container(s) exist (%s). Images referenced by stopped containers cannot be pruned.",
-                    len(stopped_containers),
-                    ", ".join(stopped_containers[:5]),
+                    "Prune notice: %d stopped container(s) exist (%s). Images attached to stopped containers cannot be pruned unless the stopped containers are deleted.",
+                    len(stopped_names),
+                    ", ".join(stopped_names),
                 )
 
             dangling_val = "false" if all_unused else "true"
@@ -1092,15 +1135,16 @@ class DockerCoordinator(DataUpdateCoordinator):
                 await asyncio.sleep(1)
 
             _LOGGER.info(
-                "Prune complete: %d total image(s) removed, %.1f MB reclaimed",
-                total_deleted, total_space / (1024 * 1024),
+                "Prune complete: %d total image(s) removed, %.1f MB reclaimed, %d stopped container(s) remaining",
+                total_deleted, total_space / (1024 * 1024), len(stopped_names),
             )
             await asyncio.sleep(1)
             await self.async_request_refresh()
             return {
                 "ImagesDeleted": total_deleted,
                 "SpaceReclaimed": total_space,
-                "StoppedContainers": len(stopped_containers),
+                "ContainersRemoved": containers_removed,
+                "StoppedContainers": stopped_names,
             }
         except Exception as err:
             _LOGGER.error("Prune failed: %s", err)

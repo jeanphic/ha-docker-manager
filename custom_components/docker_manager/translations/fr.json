@@ -67,6 +67,10 @@
         "all_unused": {
           "name": "Toutes les images inutilisées",
           "description": "Supprime toutes les images non utilisées par les conteneurs."
+        },
+        "remove_stopped_containers": {
+          "name": "Supprimer les conteneurs arrêtés",
+          "description": "Supprime les conteneurs arrêtés avant le prune d'images."
         }
       }
     },

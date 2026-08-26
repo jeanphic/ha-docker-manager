@@ -87,17 +87,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_prune(call: ServiceCall) -> None:
         entry_id = call.data.get("entry_id")
         all_unused = call.data.get("all_unused", True)
+        remove_stopped = call.data.get("remove_stopped_containers", False)
         if entry_id and entry_id in hass.data[DOMAIN]:
             coord: DockerCoordinator = hass.data[DOMAIN][entry_id]
         else:
             coord = coordinator
 
-        result = await coord.async_prune_images(all_unused=all_unused)
-        _LOGGER.info(
-            "Docker prune completed: %s images deleted, %s bytes reclaimed",
-            result.get("ImagesDeleted", 0),
-            result.get("SpaceReclaimed", 0),
+        result = await coord.async_prune_images(
+            all_unused=all_unused,
+            remove_stopped_containers=remove_stopped,
         )
+        stopped = result.get("StoppedContainers", [])
+        if stopped:
+            _LOGGER.warning(
+                "Docker prune: %s images deleted. %d stopped container(s) still exist (%s) preventing full prune.",
+                result.get("ImagesDeleted", 0),
+                len(stopped),
+                ", ".join(stopped),
+            )
+        else:
+            _LOGGER.info(
+                "Docker prune completed: %s images deleted, %s bytes reclaimed",
+                result.get("ImagesDeleted", 0),
+                result.get("SpaceReclaimed", 0),
+            )
 
     # --- Service: check all updates ---
     async def handle_check_all_updates(call: ServiceCall) -> None:
@@ -116,6 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=vol.Schema({
             vol.Optional("entry_id"): str,
             vol.Optional("all_unused", default=True): bool,
+            vol.Optional("remove_stopped_containers", default=False): bool,
         }),
     )
 

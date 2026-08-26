@@ -67,6 +67,10 @@
         "all_unused": {
           "name": "All unused images",
           "description": "Remove all images not used by running/stopped containers."
+        },
+        "remove_stopped_containers": {
+          "name": "Remove stopped containers",
+          "description": "Remove stopped containers before image pruning."
         }
       }
     },

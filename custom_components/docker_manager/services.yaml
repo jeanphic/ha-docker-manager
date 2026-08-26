@@ -17,6 +17,14 @@ prune_images:
       default: true
       selector:
         boolean:
+    remove_stopped_containers:
+      name: Remove stopped containers
+      description: >
+        If true, removes stopped/exited containers before pruning images, allowing Docker to free images attached to stopped containers.
+      required: false
+      default: false
+      selector:
+        boolean:
 
 check_all_updates:
   name: Check All Updates
