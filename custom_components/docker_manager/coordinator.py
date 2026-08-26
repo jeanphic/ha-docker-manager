@@ -1061,7 +1061,7 @@ class DockerCoordinator(DataUpdateCoordinator):
     async def async_prune_images(
         self, all_unused: bool = True, remove_stopped_containers: bool = False
     ) -> dict:
-        """Remove unused Docker images — handles stopped container warnings & optional container cleanup."""
+        """Remove unused Docker images — dual-path support for local & remote Docker daemons."""
         if not self._client:
             return {}
         try:
@@ -1110,8 +1110,9 @@ class DockerCoordinator(DataUpdateCoordinator):
 
             total_deleted = 0
             total_space = 0
+            prune_success = False
 
-            # Run up to 5 passes to clean multi-arch manifest dependency chains
+            # Primary method: Docker Engine API POST /images/prune (with explicit JSON payload and headers for TCP HTTP proxies)
             for pass_num in range(1, 6):
                 try:
                     response = await asyncio.wait_for(
@@ -1119,28 +1120,57 @@ class DockerCoordinator(DataUpdateCoordinator):
                             "images/prune",
                             method="POST",
                             params={"filters": filters_json},
+                            data=json.dumps({}),
+                            headers={"Content-Type": "application/json"},
                         ),
                         timeout=60,
                     )
+                    deleted_raw = response.get("ImagesDeleted") or []
+                    deleted_count = len(deleted_raw) if isinstance(deleted_raw, list) else (deleted_raw if isinstance(deleted_raw, int) else 0)
+                    space = response.get("SpaceReclaimed", 0) or 0
+
+                    total_deleted += deleted_count
+                    total_space += space
+                    prune_success = True
+
+                    if not deleted_count:
+                        break
+
+                    _LOGGER.info(
+                        "Prune pass %d: %d image(s) removed, %.1f MB reclaimed",
+                        pass_num, deleted_count, space / (1024 * 1024),
+                    )
+                    await asyncio.sleep(1)
+
                 except Exception as err:
-                    _LOGGER.warning("Prune pass %d error: %s", pass_num, err)
+                    _LOGGER.warning(
+                        "Prune pass %d API error on Docker daemon (%s) — will attempt individual image deletion fallback if needed",
+                        pass_num, err
+                    )
                     break
 
-                deleted_raw = response.get("ImagesDeleted") or []
-                deleted_count = len(deleted_raw) if isinstance(deleted_raw, list) else (deleted_raw if isinstance(deleted_raw, int) else 0)
-                space = response.get("SpaceReclaimed", 0) or 0
+            # Fallback method: If POST /images/prune is blocked by remote proxy (e.g. docker-socket-proxy missing POST permission or 403/405 error)
+            if not prune_success or (total_deleted == 0 and all_unused):
+                try:
+                    images_raw = await self._client.images.list()
+                    for img in images_raw:
+                        repo_tags = img.get("RepoTags") or []
+                        img_id = img.get("Id", "")
 
-                total_deleted += deleted_count
-                total_space += space
+                        is_dangling = not repo_tags or repo_tags == ["<none>:<none>"]
+                        should_delete = is_dangling or (all_unused and len(repo_tags) == 0)
 
-                if not deleted_count:
-                    break
-
-                _LOGGER.info(
-                    "Prune pass %d: %d image(s) removed, %.1f MB reclaimed",
-                    pass_num, deleted_count, space / (1024 * 1024),
-                )
-                await asyncio.sleep(1)
+                        if should_delete and img_id:
+                            try:
+                                _LOGGER.info("Prune fallback: deleting unused image %s", img_id[:12])
+                                await self._client.images.delete(img_id, force=False)
+                                total_deleted += 1
+                                space_size = img.get("Size", 0) or 0
+                                total_space += space_size
+                            except Exception as del_err:
+                                _LOGGER.debug("Could not delete image %s (in use): %s", img_id[:12], del_err)
+                except Exception as fb_err:
+                    _LOGGER.error("Prune fallback error: %s", fb_err)
 
             # Wait 2 seconds for remote daemon image index to update, then force recount images_total
             await asyncio.sleep(2)
