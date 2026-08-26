@@ -97,20 +97,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             all_unused=all_unused,
             remove_stopped_containers=remove_stopped,
         )
+        deleted = result.get("ImagesDeleted", 0)
+        reclaimed_mb = round(result.get("SpaceReclaimed", 0) / (1024 * 1024), 2)
         stopped = result.get("StoppedContainers", [])
-        if stopped:
-            _LOGGER.warning(
-                "Docker prune: %s images deleted. %d stopped container(s) still exist (%s) preventing full prune.",
-                result.get("ImagesDeleted", 0),
-                len(stopped),
-                ", ".join(stopped),
-            )
+        total_remaining = result.get("ImagesTotal", coord.images_total)
+
+        if deleted > 0:
+            msg = f"🧹 **Prune réussi** : {deleted} image(s) supprimée(s), {reclaimed_mb} MB libérés.\nTotal images restantes : {total_remaining}."
         else:
-            _LOGGER.info(
-                "Docker prune completed: %s images deleted, %s bytes reclaimed",
-                result.get("ImagesDeleted", 0),
-                result.get("SpaceReclaimed", 0),
-            )
+            msg = f"ℹ️ **Prune terminé** : 0 image supprimée.\nTotal images restantes : {total_remaining}."
+
+        if stopped:
+            msg += f"\n\n⚠️ **{len(stopped)} conteneur(s) arrêté(s) détecté(s)** ({', '.join(stopped)}). Docker refuse de supprimer les images rattachées à des conteneurs arrêtés. Activez `remove_stopped_containers: true` pour les nettoyer."
+
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "🐳 Docker Prune",
+                "message": msg,
+                "notification_id": f"docker_prune_result_{coord.entry_id}",
+            },
+        )
 
     # --- Service: check all updates ---
     async def handle_check_all_updates(call: ServiceCall) -> None:

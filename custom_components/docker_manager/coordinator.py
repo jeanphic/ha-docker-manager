@@ -1048,6 +1048,14 @@ class DockerCoordinator(DataUpdateCoordinator):
             self._update_cache[name]["local_digest"] = cdata.latest_digest if cdata else ""
             await self._save_desired_states()
 
+        # Update image count after pulling new image
+        if self._client:
+            try:
+                images_raw = await self._client.images.list()
+                self.images_total = len(images_raw)
+            except Exception:
+                pass
+
         await self.async_request_refresh()
 
     async def async_prune_images(
@@ -1079,7 +1087,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                     except Exception as e:
                         _LOGGER.warning("Prune: failed to remove container %s: %s", cname, e)
 
-                # Re-fetch stopped containers list after deletion
+                # Re-fetch containers after deletion
                 containers_raw = await self._client.containers.list(all=True)
                 stopped_containers = []
                 for c in containers_raw:
@@ -1134,17 +1142,26 @@ class DockerCoordinator(DataUpdateCoordinator):
                 )
                 await asyncio.sleep(1)
 
+            # Wait 2 seconds for remote daemon image index to update, then force recount images_total
+            await asyncio.sleep(2)
+            if self._client:
+                try:
+                    images_raw = await self._client.images.list()
+                    self.images_total = len(images_raw)
+                except Exception as e:
+                    _LOGGER.debug("Error updating images_total after prune: %s", e)
+
             _LOGGER.info(
-                "Prune complete: %d total image(s) removed, %.1f MB reclaimed, %d stopped container(s) remaining",
-                total_deleted, total_space / (1024 * 1024), len(stopped_names),
+                "Prune complete: %d total image(s) removed, %.1f MB reclaimed, %d images remaining, %d stopped container(s)",
+                total_deleted, total_space / (1024 * 1024), self.images_total, len(stopped_names),
             )
-            await asyncio.sleep(1)
             await self.async_request_refresh()
             return {
                 "ImagesDeleted": total_deleted,
                 "SpaceReclaimed": total_space,
                 "ContainersRemoved": containers_removed,
                 "StoppedContainers": stopped_names,
+                "ImagesTotal": self.images_total,
             }
         except Exception as err:
             _LOGGER.error("Prune failed: %s", err)
