@@ -723,38 +723,49 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not cdata:
             return
 
-        image_name = cdata.image
-        if not image_name:
+        raw_image = cdata.image
+        if not raw_image:
             return
 
-        if ":" not in image_name.split("/")[-1]:
-            image_name += ":latest"
+        if ":" not in raw_image.split("/")[-1]:
+            raw_image += ":latest"
 
-        _LOGGER.debug("Checking update for %s (image: %s)", container_name, image_name)
+        _LOGGER.debug("Checking update for %s (image: %s)", container_name, raw_image)
 
         try:
-            # 1. Get local image info
+            # 1. Get local image info from Docker Engine (try exact raw tag first, then image_id fallback)
+            local_image = None
             try:
                 local_image = await asyncio.wait_for(
-                    self._client._query_json(f"images/{image_name}/json"),
+                    self._client._query_json(f"images/{raw_image}/json"),
                     timeout=10
                 )
-            except (asyncio.TimeoutError, Exception) as e:
-                _LOGGER.warning("Image inspect failed for %s: %s", container_name, e)
+            except (asyncio.TimeoutError, DockerError, Exception):
+                if cdata.image_id:
+                    try:
+                        local_image = await asyncio.wait_for(
+                            self._client._query_json(f"images/{cdata.image_id}/json"),
+                            timeout=10
+                        )
+                    except Exception:
+                        pass
+
+            if not local_image:
+                _LOGGER.debug("Local image inspect skipped/not found for %s (%s)", container_name, raw_image)
                 cdata.last_update_check = datetime.now(timezone.utc)
                 self.async_set_updated_data(self.data)
                 return
 
             repo_digests = local_image.get("RepoDigests", [])
             local_digest = ""
-            pure_repo = image_name.split(":")[0]
+            pure_repo = raw_image.split(":")[0]
             if "/" in pure_repo and ("." in pure_repo.split("/")[0] or ":" in pure_repo.split("/")[0]):
                 pure_repo = pure_repo.split("/", 1)[1]
 
             for rd in repo_digests:
                 if "@" in rd:
                     rd_repo, rd_hash = rd.split("@", 1)
-                    if pure_repo in rd_repo or rd_repo in image_name or pure_repo in rd:
+                    if pure_repo in rd_repo or rd_repo in raw_image or pure_repo in rd:
                         local_digest = rd_hash
                         break
             if not local_digest and repo_digests:
@@ -763,10 +774,10 @@ class DockerCoordinator(DataUpdateCoordinator):
             local_id = local_image.get("Id", "")
 
             # 2. Get remote digests (index digest + platform digest matching target daemon arch)
-            remote_index_digest, remote_platform_digest = await self._get_remote_digests(image_name)
+            remote_index_digest, remote_platform_digest = await self._get_remote_digests(raw_image)
             if not remote_index_digest and not remote_platform_digest:
                 await asyncio.sleep(1)
-                remote_index_digest, remote_platform_digest = await self._get_remote_digests(image_name)
+                remote_index_digest, remote_platform_digest = await self._get_remote_digests(raw_image)
 
             if not remote_index_digest and not remote_platform_digest:
                 _LOGGER.debug("No remote digest for %s — skipping", container_name)
@@ -786,7 +797,6 @@ class DockerCoordinator(DataUpdateCoordinator):
             clean_id = _clean_hash(local_id)
 
             # 3. Dual-digest comparison logic
-            # Image is UP TO DATE if local digest matches EITHER remote index digest OR remote platform digest
             if clean_local:
                 is_up_to_date = (
                     (clean_remote_index != "" and clean_local == clean_remote_index)
@@ -954,12 +964,12 @@ class DockerCoordinator(DataUpdateCoordinator):
         try:
             async def _do_pull():
                 try:
-                    response = await self._client._query(
+                    # aiodocker._query is an async context manager: use async with without double-awaiting
+                    async with self._client._query(
                         "images/create",
                         method="POST",
                         params=pull_params,
-                    )
-                    async with response:
+                    ) as response:
                         async for _ in response.content:
                             pass
                 except Exception as err:
@@ -1099,7 +1109,7 @@ class DockerCoordinator(DataUpdateCoordinator):
 
             stopped_names = [name for _, name in stopped_containers]
             if stopped_names:
-                _LOGGER.warning(
+                _LOGGER.info(
                     "Prune notice: %d stopped container(s) exist (%s). Images attached to stopped containers cannot be pruned unless the stopped containers are deleted.",
                     len(stopped_names),
                     ", ".join(stopped_names),
@@ -1112,7 +1122,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             total_space = 0
             prune_success = False
 
-            # Primary method: Docker Engine API POST /images/prune (with explicit JSON payload and headers for TCP HTTP proxies)
+            # Primary method: Docker Engine API POST /images/prune
             for pass_num in range(1, 6):
                 try:
                     response = await asyncio.wait_for(
@@ -1149,7 +1159,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                     )
                     break
 
-            # Fallback method: If POST /images/prune is blocked by remote proxy (e.g. docker-socket-proxy missing POST permission or 403/405 error)
+            # Fallback method: If POST /images/prune is blocked by remote proxy
             if not prune_success or (total_deleted == 0 and all_unused):
                 try:
                     images_raw = await self._client.images.list()
