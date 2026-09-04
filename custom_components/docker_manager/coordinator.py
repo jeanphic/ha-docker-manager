@@ -756,22 +756,26 @@ class DockerCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(self.data)
                 return
 
-            repo_digests = local_image.get("RepoDigests", [])
-            local_digest = ""
-            pure_repo = raw_image.split(":")[0]
-            if "/" in pure_repo and ("." in pure_repo.split("/")[0] or ":" in pure_repo.split("/")[0]):
-                pure_repo = pure_repo.split("/", 1)[1]
+            def _clean_hash(h: str | None) -> str:
+                if not h:
+                    return ""
+                h = h.strip().lower()
+                return h[7:] if h.startswith("sha256:") else h
 
+            repo_digests = local_image.get("RepoDigests", [])
+            local_id = local_image.get("Id", "")
+
+            # Gather ALL local hashes from RepoDigests & local Image ID
+            local_hashes = set()
             for rd in repo_digests:
                 if "@" in rd:
-                    rd_repo, rd_hash = rd.split("@", 1)
-                    if pure_repo in rd_repo or rd_repo in raw_image or pure_repo in rd:
-                        local_digest = rd_hash
-                        break
-            if not local_digest and repo_digests:
-                local_digest = repo_digests[0].split("@")[-1]
+                    h = _clean_hash(rd.split("@", 1)[-1])
+                    if h:
+                        local_hashes.add(h)
 
-            local_id = local_image.get("Id", "")
+            clean_id = _clean_hash(local_id)
+            if clean_id:
+                local_hashes.add(clean_id)
 
             # 2. Get remote digests (index digest + platform digest matching target daemon arch)
             remote_index_digest, remote_platform_digest = await self._get_remote_digests(raw_image)
@@ -785,29 +789,21 @@ class DockerCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(self.data)
                 return
 
-            def _clean_hash(h: str | None) -> str:
-                if not h:
-                    return ""
-                h = h.strip().lower()
-                return h[7:] if h.startswith("sha256:") else h
-
-            clean_local = _clean_hash(local_digest)
             clean_remote_index = _clean_hash(remote_index_digest)
             clean_remote_platform = _clean_hash(remote_platform_digest)
-            clean_id = _clean_hash(local_id)
 
-            # 3. Dual-digest comparison logic
-            if clean_local:
-                is_up_to_date = (
-                    (clean_remote_index != "" and clean_local == clean_remote_index)
-                    or (clean_remote_platform != "" and clean_local == clean_remote_platform)
-                )
+            remote_hashes = {clean_remote_index, clean_remote_platform} - {""}
+
+            # 3. Dual-digest set-intersection logic
+            # Container is UP TO DATE if ANY local hash matches ANY remote digest
+            if local_hashes and remote_hashes:
+                is_up_to_date = bool(local_hashes & remote_hashes)
                 update_available = not is_up_to_date
-                local_ref = f"sha256:{clean_local[:12]}"
             else:
-                # If local_digest is empty (e.g. untagged local build / custom tag), do NOT flag false update
                 update_available = False
-                local_ref = f"sha256:{clean_id[:12]}" if clean_id else "local"
+
+            display_local = list(local_hashes)[0] if local_hashes else clean_id
+            local_ref = f"sha256:{display_local[:12]}" if display_local else "local"
 
             best_remote = clean_remote_platform or clean_remote_index
             latest_ref = f"sha256:{best_remote[:12]}" if best_remote else "latest"
@@ -827,8 +823,8 @@ class DockerCoordinator(DataUpdateCoordinator):
             self.hass.async_create_task(self._save_desired_states())
 
             _LOGGER.info(
-                "Update check %s: local=%s remote_index=%s remote_plat=%s available=%s",
-                container_name, local_ref, clean_remote_index[:12] if clean_remote_index else "none", clean_remote_platform[:12] if clean_remote_platform else "none", update_available,
+                "Update check %s: local_hashes=%s remote_index=%s remote_plat=%s available=%s",
+                container_name, [h[:12] for h in local_hashes], clean_remote_index[:12] if clean_remote_index else "none", clean_remote_platform[:12] if clean_remote_platform else "none", update_available,
             )
 
         except Exception as err:
@@ -964,7 +960,6 @@ class DockerCoordinator(DataUpdateCoordinator):
         try:
             async def _do_pull():
                 try:
-                    # aiodocker._query is an async context manager: use async with without double-awaiting
                     async with self._client._query(
                         "images/create",
                         method="POST",
@@ -1159,7 +1154,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                     )
                     break
 
-            # Fallback method: If POST /images/prune is blocked by remote proxy
+            # Fallback method: If POST /images/prune failed or didn't delete tagged unused images
             if not prune_success or (total_deleted == 0 and all_unused):
                 try:
                     images_raw = await self._client.images.list()
