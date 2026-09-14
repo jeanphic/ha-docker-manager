@@ -27,6 +27,7 @@ from .const import (
     CONF_UPDATE_CHECK_INTERVAL,
     DEFAULT_URL,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_UPDATE_CHECK_INTERVAL,
     DISABLE_UPDATE_CHECK,
 )
 
@@ -276,7 +277,7 @@ class DockerManagerOptionsFlow(OptionsFlowWithReload):
 
         current_update_interval: int = self.config_entry.options.get(
             CONF_UPDATE_CHECK_INTERVAL,
-            self.config_entry.data.get(CONF_UPDATE_CHECK_INTERVAL, DISABLE_UPDATE_CHECK),
+            self.config_entry.data.get(CONF_UPDATE_CHECK_INTERVAL, DEFAULT_UPDATE_CHECK_INTERVAL),
         )
 
         return self.async_show_form(
