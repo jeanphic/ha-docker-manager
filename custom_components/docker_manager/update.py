@@ -152,9 +152,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
             return
 
         finally:
-            await asyncio.sleep(1)
             self._in_progress = False
             self._step_label = ""
             self._install_lock = False
             self.async_write_ha_state()
-            await self.coordinator.async_request_refresh()

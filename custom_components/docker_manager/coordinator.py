@@ -1043,10 +1043,28 @@ class DockerCoordinator(DataUpdateCoordinator):
 
         _LOGGER.info("[%s] Update complete", name)
 
-        cdata = self.get_container_data(name)
-        if cdata:
-            cdata.update_available = False
-            cdata.local_digest = cdata.latest_digest
+        # Immediate state update for this container in coordinator data
+        try:
+            new_info = await new_container.show()
+            prev_cdata = self.get_container_data(name)
+            new_cdata = ContainerData(new_info, stats=None)
+            new_cdata.latest_digest = prev_cdata.latest_digest if prev_cdata else ""
+            new_cdata.local_digest = new_cdata.latest_digest
+            new_cdata.update_available = False
+            new_cdata.last_update_check = datetime.now(timezone.utc)
+            if prev_cdata:
+                new_cdata.cpu_percent = prev_cdata.cpu_percent
+                new_cdata.memory_mb = prev_cdata.memory_mb
+                new_cdata.memory_percent = prev_cdata.memory_percent
+            if self.data is not None:
+                self.data[name] = new_cdata
+            cdata = new_cdata
+        except Exception as e:
+            _LOGGER.debug("[%s] Error building immediate ContainerData: %s", name, e)
+            cdata = self.get_container_data(name)
+            if cdata:
+                cdata.update_available = False
+                cdata.local_digest = cdata.latest_digest
 
         if name in self._update_cache:
             self._update_cache[name]["update_available"] = False
@@ -1061,7 +1079,11 @@ class DockerCoordinator(DataUpdateCoordinator):
             except Exception:
                 pass
 
-        await self.async_request_refresh()
+        # Push updated data to all HA entities immediately
+        if self.data is not None:
+            self.async_set_updated_data(self.data)
+        else:
+            await self.async_refresh()
 
     async def async_prune_images(
         self, all_unused: bool = True, remove_stopped_containers: bool = False
@@ -1177,8 +1199,7 @@ class DockerCoordinator(DataUpdateCoordinator):
                 except Exception as fb_err:
                     _LOGGER.error("Prune fallback error: %s", fb_err)
 
-            # Wait 2 seconds for remote daemon image index to update, then force recount images_total
-            await asyncio.sleep(2)
+            # Recount images_total immediately without artificial delay
             if self._client:
                 try:
                     images_raw = await self._client.images.list()
@@ -1186,11 +1207,15 @@ class DockerCoordinator(DataUpdateCoordinator):
                 except Exception as e:
                     _LOGGER.debug("Error updating images_total after prune: %s", e)
 
+            # Instantly update all global sensors (images_total, etc.)
+            self.async_update_listeners()
+
             _LOGGER.info(
                 "Prune complete: %d total image(s) removed, %.1f MB reclaimed, %d images remaining, %d stopped container(s)",
                 total_deleted, total_space / (1024 * 1024), self.images_total, len(stopped_names),
             )
-            await self.async_request_refresh()
+            if containers_removed > 0:
+                await self.async_refresh()
             return {
                 "ImagesDeleted": total_deleted,
                 "SpaceReclaimed": total_space,
