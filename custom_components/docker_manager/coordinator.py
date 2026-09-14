@@ -1169,19 +1169,36 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not self._client:
             return {}
         try:
+            # 1. Inspect all containers to know which images are locked
             containers_raw = await self._client.containers.list(all=True)
-            stopped_containers: list[tuple[Any, str]] = []
+            stopped_containers: list[tuple[Any, str, str]] = []  # (container_obj, name, image_id)
+            running_image_ids: set[str] = set()
+            stopped_image_ids: set[str] = set()
+
             for c in containers_raw:
-                info = await c.show()
+                try:
+                    info = await c.show()
+                except Exception:
+                    continue
                 cname = info.get("Name", "").lstrip("/")
                 status = info.get("State", {}).get("Status", "")
+                c_img = info.get("Image", "")
+                clean_img = c_img[7:] if c_img.startswith("sha256:") else c_img
+
                 if status in ("exited", "created", "dead"):
-                    stopped_containers.append((c, cname))
+                    stopped_containers.append((c, cname, c_img))
+                    if c_img:
+                        stopped_image_ids.add(c_img)
+                        stopped_image_ids.add(clean_img)
+                elif status == "running":
+                    if c_img:
+                        running_image_ids.add(c_img)
+                        running_image_ids.add(clean_img)
 
             # Optional: remove stopped containers first if requested
             containers_removed = 0
             if remove_stopped_containers and stopped_containers:
-                for container_obj, cname in stopped_containers:
+                for container_obj, cname, _ in stopped_containers:
                     if self._is_ha_container(cname):
                         continue
                     try:
@@ -1194,89 +1211,143 @@ class DockerCoordinator(DataUpdateCoordinator):
                 # Re-fetch containers after deletion
                 containers_raw = await self._client.containers.list(all=True)
                 stopped_containers = []
+                stopped_image_ids = set()
                 for c in containers_raw:
-                    info = await c.show()
+                    try:
+                        info = await c.show()
+                    except Exception:
+                        continue
                     cname = info.get("Name", "").lstrip("/")
                     status = info.get("State", {}).get("Status", "")
+                    c_img = info.get("Image", "")
+                    clean_img = c_img[7:] if c_img.startswith("sha256:") else c_img
                     if status in ("exited", "created", "dead"):
-                        stopped_containers.append((c, cname))
+                        stopped_containers.append((c, cname, c_img))
+                        if c_img:
+                            stopped_image_ids.add(c_img)
+                            stopped_image_ids.add(clean_img)
 
-            stopped_names = [name for _, name in stopped_containers]
+            stopped_names = [name for _, name, _ in stopped_containers]
             if stopped_names:
                 _LOGGER.info(
-                    "Prune notice: %d stopped container(s) exist (%s). Images attached to stopped containers cannot be pruned unless the stopped containers are deleted.",
+                    "Prune notice: %d stopped container(s) exist (%s). Images attached to stopped containers cannot be pruned unless remove_stopped_containers=True.",
                     len(stopped_names),
                     ", ".join(stopped_names),
                 )
 
-            dangling_val = "false" if all_unused else "true"
-            filters_json = json.dumps({"dangling": [dangling_val]})
-
             total_deleted = 0
             total_space = 0
-            prune_success = False
 
-            # Primary method: Docker Engine API POST /images/prune
-            for pass_num in range(1, 6):
-                try:
-                    response = await asyncio.wait_for(
-                        self._client._query_json(
-                            "images/prune",
-                            method="POST",
-                            params={"filters": filters_json},
-                            data=json.dumps({}),
-                            headers={"Content-Type": "application/json"},
-                        ),
-                        timeout=60,
-                    )
-                    deleted_raw = response.get("ImagesDeleted") or []
-                    deleted_count = len(deleted_raw) if isinstance(deleted_raw, list) else (deleted_raw if isinstance(deleted_raw, int) else 0)
-                    space = response.get("SpaceReclaimed", 0) or 0
+            # 2. Primary method: Docker Engine API POST /images/prune
+            filters_to_try = []
+            if all_unused:
+                filters_to_try.append(json.dumps({"dangling": ["false"]}))
+            filters_to_try.append(json.dumps({"dangling": ["true"]}))
 
-                    total_deleted += deleted_count
-                    total_space += space
-                    prune_success = True
+            for f_json in filters_to_try:
+                for pass_num in range(1, 4):
+                    try:
+                        response = await asyncio.wait_for(
+                            self._client._query_json(
+                                "images/prune",
+                                method="POST",
+                                params={"filters": f_json},
+                                data=json.dumps({}),
+                                headers={"Content-Type": "application/json"},
+                            ),
+                            timeout=60,
+                        )
+                        deleted_raw = response.get("ImagesDeleted") or []
+                        deleted_count = len(deleted_raw) if isinstance(deleted_raw, list) else (deleted_raw if isinstance(deleted_raw, int) else 0)
+                        space = response.get("SpaceReclaimed", 0) or 0
 
-                    if not deleted_count:
+                        total_deleted += deleted_count
+                        total_space += space
+
+                        if not deleted_count:
+                            break
+
+                        _LOGGER.info(
+                            "Prune pass %d (%s): %d image(s) removed, %.1f MB reclaimed",
+                            pass_num, f_json, deleted_count, space / (1024 * 1024),
+                        )
+                        await asyncio.sleep(0.5)
+
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Prune POST /images/prune API error (%s) — will use direct image deletion fallback",
+                            err,
+                        )
                         break
 
-                    _LOGGER.info(
-                        "Prune pass %d: %d image(s) removed, %.1f MB reclaimed",
-                        pass_num, deleted_count, space / (1024 * 1024),
+            # 3. Dedicated Untagged & Unused Images Deletion Pass
+            # Directly handles untagged (<none>:<none>) images that Docker prune leaves behind!
+            try:
+                images_raw = await self._client.images.list(all=True)
+                for img in images_raw:
+                    repo_tags = img.get("RepoTags") or []
+                    repo_digests = img.get("RepoDigests") or []
+                    img_id = img.get("Id", "")
+                    clean_id = img_id[7:] if img_id.startswith("sha256:") else img_id
+
+                    # Check if untagged: no tags, or all tags are <none>
+                    is_untagged = (
+                        not repo_tags
+                        or repo_tags == ["<none>:<none>"]
+                        or repo_tags == ["<none>"]
+                        or all(t in ("<none>:<none>", "<none>", "") for t in repo_tags)
                     )
-                    await asyncio.sleep(1)
 
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Prune pass %d API error on Docker daemon (%s) — will attempt individual image deletion fallback if needed",
-                        pass_num, err
-                    )
-                    break
+                    # An untagged image must NEVER be deleted if used by a running container
+                    is_used_by_running = (img_id in running_image_ids or clean_id in running_image_ids)
+                    is_used_by_stopped = (img_id in stopped_image_ids or clean_id in stopped_image_ids)
 
-            # Fallback method: If POST /images/prune failed or didn't delete tagged unused images
-            if not prune_success or (total_deleted == 0 and all_unused):
-                try:
-                    images_raw = await self._client.images.list()
-                    for img in images_raw:
-                        repo_tags = img.get("RepoTags") or []
-                        img_id = img.get("Id", "")
+                    if is_used_by_running:
+                        continue
+                    if is_used_by_stopped and not remove_stopped_containers:
+                        _LOGGER.info(
+                            "Untagged image %s is attached to a stopped container — skipping (enable remove_stopped_containers to delete)",
+                            img_id[:12],
+                        )
+                        continue
 
-                        is_dangling = not repo_tags or repo_tags == ["<none>:<none>"]
-                        should_delete = is_dangling or (all_unused and len(repo_tags) == 0)
+                    # If untagged, or if all_unused and no tags:
+                    if is_untagged or (all_unused and not repo_tags):
+                        deleted_this = False
 
-                        if should_delete and img_id:
-                            try:
-                                _LOGGER.info("Prune fallback: deleting unused image %s", img_id[:12])
-                                await self._client.images.delete(img_id, force=False)
-                                total_deleted += 1
-                                space_size = img.get("Size", 0) or 0
-                                total_space += space_size
-                            except Exception as del_err:
-                                _LOGGER.debug("Could not delete image %s (in use): %s", img_id[:12], del_err)
-                except Exception as fb_err:
-                    _LOGGER.error("Prune fallback error: %s", fb_err)
+                        # Step A: Delete by RepoDigests reference first (cleans up repo references cleanly)
+                        for rd in repo_digests:
+                            if "@sha256:" in rd and not rd.startswith("<none>"):
+                                try:
+                                    _LOGGER.info("Prune deleting untagged digest: %s", rd)
+                                    await self._client.images.delete(rd, force=True)
+                                    deleted_this = True
+                                    total_deleted += 1
+                                    total_space += (img.get("Size", 0) or 0)
+                                except Exception as e:
+                                    _LOGGER.debug("Could not delete digest %s: %s", rd, e)
 
-            # Recount images_total immediately without artificial delay
+                        # Step B: Delete by Image ID with force=True
+                        if not deleted_this:
+                            for target in (clean_id, img_id):
+                                if not target:
+                                    continue
+                                try:
+                                    _LOGGER.info("Prune deleting untagged image ID: %s", target[:12])
+                                    await self._client.images.delete(target, force=True)
+                                    deleted_this = True
+                                    total_deleted += 1
+                                    total_space += (img.get("Size", 0) or 0)
+                                    break
+                                except Exception as del_err:
+                                    _LOGGER.debug("Prune: could not delete image %s: %s", target[:12], del_err)
+                            if not deleted_this and img_id:
+                                _LOGGER.warning("Could not delete untagged image %s (image may be in use by an active/stopped container or volume)", img_id[:12])
+
+            except Exception as fb_err:
+                _LOGGER.error("Untagged images prune error: %s", fb_err)
+
+            # 4. Final recount of total images
             if self._client:
                 try:
                     images_raw = await self._client.images.list()
@@ -1293,6 +1364,7 @@ class DockerCoordinator(DataUpdateCoordinator):
             )
             if containers_removed > 0:
                 await self.async_refresh()
+
             return {
                 "ImagesDeleted": total_deleted,
                 "SpaceReclaimed": total_space,
