@@ -195,6 +195,7 @@ class DockerCoordinator(DataUpdateCoordinator):
         self.system_variant: str | None = None
         self.images_total: int = 0
         self._update_cache: dict[str, dict] = {}
+        self._updating_containers: set[str] = set()
         # HA storage for persisting container states across restarts
         self._store: Store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry_id}")
         self._desired_states: dict[str, str] = {}  # name → "running"|"stopped"|"paused"
@@ -351,13 +352,29 @@ class DockerCoordinator(DataUpdateCoordinator):
 
                     cdata = ContainerData(info, stats)
 
-                    # Preserve update info from previous cycle in-memory
+                    # Preserve or update update info from previous cycle in-memory
                     if self.data and cdata.name in self.data:
                         prev: ContainerData = self.data[cdata.name]
-                        cdata.update_available = prev.update_available
-                        cdata.latest_digest = prev.latest_digest
-                        cdata.local_digest = prev.local_digest
-                        cdata.last_update_check = prev.last_update_check
+                        # If container is currently updating, keep update_available False
+                        if cdata.name in self._updating_containers:
+                            cdata.update_available = False
+                            cdata.latest_digest = prev.latest_digest
+                            cdata.local_digest = prev.latest_digest
+                            cdata.last_update_check = datetime.now(timezone.utc)
+                        # If container was recreated or image ID changed, the update was applied!
+                        elif cdata.id != prev.id or (cdata.image_id and prev.image_id and cdata.image_id != prev.image_id):
+                            cdata.update_available = False
+                            cdata.local_digest = prev.latest_digest or cdata.image_id
+                            cdata.latest_digest = prev.latest_digest or cdata.image_id
+                            cdata.last_update_check = datetime.now(timezone.utc)
+                            if cdata.name in self._update_cache:
+                                self._update_cache[cdata.name]["update_available"] = False
+                                self._update_cache[cdata.name]["local_digest"] = cdata.local_digest
+                        else:
+                            cdata.update_available = prev.update_available
+                            cdata.latest_digest = prev.latest_digest
+                            cdata.local_digest = prev.local_digest
+                            cdata.last_update_check = prev.last_update_check
                     elif cdata.name in self._update_cache:
                         # On HA startup/reboot, restore cached update status
                         cached = self._update_cache[cdata.name]
@@ -988,6 +1005,24 @@ class DockerCoordinator(DataUpdateCoordinator):
         if not self._client:
             return
 
+        target_cdata = self.get_container_data(name)
+        target_latest_digest = target_cdata.latest_digest if target_cdata else ""
+        self._updating_containers.add(name)
+
+        try:
+            await self._async_update_container_impl(
+                name, target_cdata, target_latest_digest, progress_callback
+            )
+        finally:
+            self._updating_containers.discard(name)
+
+    async def _async_update_container_impl(
+        self,
+        name: str,
+        target_cdata: ContainerData | None,
+        target_latest_digest: str,
+        progress_callback=None,
+    ) -> None:
         async def _cb(percent: int, label: str) -> None:
             if progress_callback:
                 await progress_callback(percent, label)
@@ -1123,16 +1158,15 @@ class DockerCoordinator(DataUpdateCoordinator):
         # Immediate state update for this container in coordinator data
         try:
             new_info = await new_container.show()
-            prev_cdata = self.get_container_data(name)
             new_cdata = ContainerData(new_info, stats=None)
-            new_cdata.latest_digest = prev_cdata.latest_digest if prev_cdata else ""
-            new_cdata.local_digest = new_cdata.latest_digest
+            new_cdata.latest_digest = target_latest_digest
+            new_cdata.local_digest = target_latest_digest
             new_cdata.update_available = False
             new_cdata.last_update_check = datetime.now(timezone.utc)
-            if prev_cdata:
-                new_cdata.cpu_percent = prev_cdata.cpu_percent
-                new_cdata.memory_mb = prev_cdata.memory_mb
-                new_cdata.memory_percent = prev_cdata.memory_percent
+            if target_cdata:
+                new_cdata.cpu_percent = target_cdata.cpu_percent
+                new_cdata.memory_mb = target_cdata.memory_mb
+                new_cdata.memory_percent = target_cdata.memory_percent
             if self.data is not None:
                 self.data[name] = new_cdata
             cdata = new_cdata
@@ -1141,12 +1175,17 @@ class DockerCoordinator(DataUpdateCoordinator):
             cdata = self.get_container_data(name)
             if cdata:
                 cdata.update_available = False
-                cdata.local_digest = cdata.latest_digest
+                cdata.local_digest = target_latest_digest
+                cdata.latest_digest = target_latest_digest
 
-        if name in self._update_cache:
-            self._update_cache[name]["update_available"] = False
-            self._update_cache[name]["local_digest"] = cdata.latest_digest if cdata else ""
-            await self._save_desired_states()
+        # Always update cache with update_available = False
+        self._update_cache[name] = {
+            "update_available": False,
+            "local_digest": target_latest_digest,
+            "latest_digest": target_latest_digest,
+            "last_update_check": datetime.now(timezone.utc).isoformat(),
+        }
+        await self._save_desired_states()
 
         # Update image count after pulling new image
         if self._client:

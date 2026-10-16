@@ -39,6 +39,8 @@ async def async_setup_entry(
                 new.append(DockerContainerUpdate(coordinator, name))
         if new:
             async_add_entities(new)
+            for e in new:
+                entities.append(e)
 
     coordinator.async_add_listener(_handle_update)
 
@@ -143,6 +145,7 @@ class DockerContainerUpdate(DockerContainerEntity, UpdateEntity):
                 cdata.update_available = False
                 cdata.local_digest = cdata.latest_digest
             await self._set_step(100, "✅ Update complete")
+            await asyncio.sleep(1.5)
 
         except Exception as err:
             _LOGGER.error("Update failed for %s: %s", self._container_name, err)
