@@ -1,6 +1,9 @@
 {
   "domain": "docker_manager",
   "name": "Docker Manager",
+  "categories": [
+    "computers_network.nas_servers"
+  ],
   "codeowners": [
     "@jeanphic"
   ],
@@ -9,8 +12,7 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/jeanphic/ha-docker-manager/issues",
   "requirements": [
-    "aiodocker>=0.21.0",
-    "aiohttp>=3.9.0"
+    "aiodocker>=0.21.0"
   ],
-  "version": "3.2.10"
+  "version": "3.2.11"
 }
