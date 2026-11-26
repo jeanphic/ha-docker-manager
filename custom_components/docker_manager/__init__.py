@@ -6,6 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 import voluptuous as vol
 
 from .const import (
@@ -81,6 +82,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Container down notifications enabled")
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    # Register the host device first so container devices can link to it
+    # through via_device_id (via_device is deprecated).
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Docker Host",
+        manufacturer="Docker Inc.",
+        model=f"Docker Engine {coordinator.docker_version}",
+        sw_version=coordinator.docker_version,
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
